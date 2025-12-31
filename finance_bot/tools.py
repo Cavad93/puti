@@ -263,6 +263,15 @@ class FinancialTools:
                 }
             },
             {
+                "name": "get_loan_holidays",
+                "description": "Получить все кредитные каникулы пользователя (активные и будущие). ВАЖНО: используй этот инструмент ПЕРЕД любыми расчетами, прогнозами и рекомендациями по долгам!",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
                 "name": "connect_bank_api",
                 "description": "Подключить API Т-Банка. Используй когда пользователь хочет добавить банковскую интеграцию и предоставляет API токен",
                 "input_schema": {
@@ -439,6 +448,8 @@ class FinancialTools:
                 return await self._calculate_early_payment(user_id, tool_input)
             elif tool_name == "set_loan_holiday":
                 return await self._set_loan_holiday(user_id, tool_input)
+            elif tool_name == "get_loan_holidays":
+                return await self._get_loan_holidays(user_id)
             elif tool_name == "connect_bank_api":
                 return await self._connect_bank_api(user_id, tool_input)
             elif tool_name == "sync_bank_operations":
@@ -658,20 +669,44 @@ class FinancialTools:
         }
 
     async def _list_loans(self, user_id: int) -> Dict:
+        from datetime import datetime
+
         loans = await self.db.get_active_loans(user_id)
         if not loans:
             return {"success": True, "loans": [], "message": "Нет активных кредитов"}
 
         loans_list = []
+        current_date = datetime.now().date().strftime('%Y-%m-%d')
+
         for loan in loans:
-            loans_list.append({
+            # Проверить есть ли активные каникулы
+            active_holiday = await self.db.get_active_holiday_for_loan(loan['id'], current_date)
+
+            # Получить все каникулы по этому кредиту
+            all_holidays = await self.db.get_loan_holidays(loan['id'])
+
+            loan_info = {
                 "id": loan['id'],
                 "name": loan['name'],
                 "type": loan['loan_type'],
                 "balance": loan['current_balance'],
                 "rate": loan['interest_rate'],
-                "monthly_payment": loan['monthly_payment']
-            })
+                "monthly_payment": loan['monthly_payment'],
+                "has_active_holiday": active_holiday is not None,
+                "holidays": []
+            }
+
+            # Добавить информацию о каникулах
+            if all_holidays:
+                for holiday in all_holidays:
+                    loan_info["holidays"].append({
+                        "start_date": holiday['start_date'],
+                        "end_date": holiday['end_date'],
+                        "notes": holiday.get('notes', ''),
+                        "is_active": holiday['start_date'] <= current_date <= holiday['end_date']
+                    })
+
+            loans_list.append(loan_info)
 
         return {"success": True, "loans": loans_list}
 
@@ -764,27 +799,52 @@ class FinancialTools:
         }
 
     async def _calculate_debt_strategy(self, user_id: int, input_data: Dict) -> Dict:
+        from datetime import datetime
+
         loans = await self.db.get_active_loans(user_id)
 
         if not loans:
             return {"success": False, "error": "Нет активных кредитов"}
 
-        debts = [
-            {
+        current_date = datetime.now().date().strftime('%Y-%m-%d')
+
+        # Проверить каникулы для каждого кредита
+        debts = []
+        loans_with_holidays = []
+
+        for l in loans:
+            active_holiday = await self.db.get_active_holiday_for_loan(l['id'], current_date)
+
+            debts.append({
                 'name': l['name'],
                 'balance': l['current_balance'],
                 'rate': l['interest_rate'],
                 'monthly_payment': l['monthly_payment']
-            }
-            for l in loans
-        ]
+            })
+
+            if active_holiday:
+                loans_with_holidays.append({
+                    'name': l['name'],
+                    'start': active_holiday['start_date'],
+                    'end': active_holiday['end_date']
+                })
 
         extra_monthly = input_data.get('extra_monthly', 0)
         comparison = self.calculator.compare_strategies(debts, extra_monthly)
 
+        # Добавить предупреждение о каникулах
+        warning_message = ""
+        if loans_with_holidays:
+            warning_message = "\n⚠️ **ВНИМАНИЕ: АКТИВНЫЕ КАНИКУЛЫ**\n"
+            for h in loans_with_holidays:
+                warning_message += f"• {h['name']}: каникулы до {h['end']}\n"
+            warning_message += "Расчет может не учитывать продление срока кредита!\n"
+
         return {
             "success": True,
-            "comparison": comparison
+            "comparison": comparison,
+            "active_holidays": loans_with_holidays,
+            "holidays_warning": warning_message
         }
 
     async def _create_budget_category(self, user_id: int, input_data: Dict) -> Dict:
@@ -974,6 +1034,86 @@ class FinancialTools:
                       f"Продолжительность: {months_holiday} мес.\n\n"
                       f"⚠️ График платежей будет продлён на {months_holiday} мес.\n"
                       f"💡 Проценты продолжат начисляться во время каникул"
+        }
+
+    async def _get_loan_holidays(self, user_id: int) -> Dict:
+        """Получить все кредитные каникулы пользователя"""
+        from datetime import datetime
+
+        loans = await self.db.get_active_loans(user_id)
+        if not loans:
+            return {
+                "success": True,
+                "message": "У вас нет активных кредитов",
+                "holidays": []
+            }
+
+        current_date = datetime.now().date().strftime('%Y-%m-%d')
+        all_holidays = []
+        active_count = 0
+
+        for loan in loans:
+            holidays = await self.db.get_loan_holidays(loan['id'])
+
+            for holiday in holidays:
+                is_active = holiday['start_date'] <= current_date <= holiday['end_date']
+                is_future = holiday['start_date'] > current_date
+
+                if is_active:
+                    active_count += 1
+
+                all_holidays.append({
+                    "loan_name": loan['name'],
+                    "loan_id": loan['id'],
+                    "start_date": holiday['start_date'],
+                    "end_date": holiday['end_date'],
+                    "notes": holiday.get('notes', ''),
+                    "is_active": is_active,
+                    "is_future": is_future,
+                    "is_past": not is_active and not is_future
+                })
+
+        if not all_holidays:
+            return {
+                "success": True,
+                "message": "📅 Нет зарегистрированных кредитных каникул",
+                "holidays": []
+            }
+
+        # Формируем сообщение
+        message = f"📅 **КРЕДИТНЫЕ КАНИКУЛЫ**\n\n"
+
+        if active_count > 0:
+            message += f"🟢 **Активны сейчас:** {active_count}\n\n"
+
+        # Группируем по статусу
+        active_holidays = [h for h in all_holidays if h['is_active']]
+        future_holidays = [h for h in all_holidays if h['is_future']]
+        past_holidays = [h for h in all_holidays if h['is_past']]
+
+        if active_holidays:
+            message += "**🟢 АКТИВНЫЕ:**\n"
+            for h in active_holidays:
+                message += f"• {h['loan_name']}: {h['start_date']} — {h['end_date']}\n"
+            message += "\n"
+
+        if future_holidays:
+            message += "**🔵 БУДУЩИЕ:**\n"
+            for h in future_holidays:
+                message += f"• {h['loan_name']}: {h['start_date']} — {h['end_date']}\n"
+            message += "\n"
+
+        if past_holidays:
+            message += "**⚪ ПРОШЕДШИЕ:**\n"
+            for h in past_holidays:
+                message += f"• {h['loan_name']}: {h['start_date']} — {h['end_date']}\n"
+
+        return {
+            "success": True,
+            "message": message,
+            "holidays": all_holidays,
+            "active_count": active_count,
+            "total_count": len(all_holidays)
         }
 
     async def _connect_bank_api(self, user_id: int, input_data: Dict) -> Dict:

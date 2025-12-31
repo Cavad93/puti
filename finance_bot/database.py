@@ -919,8 +919,8 @@ class Database:
             # Запланированные расходы
             await db.execute('DELETE FROM planned_expenses WHERE user_id = ?', (user_id,))
 
-            # Категории бюджета
-            await db.execute('DELETE FROM budget_categories WHERE user_id = ?', (user_id,))
+            # Категории бюджета - НЕ удаляем, т.к. бюджет общий для всех пользователей
+            # Если нужно удалить бюджет, это делается вручную через отдельную команду
 
             # Доходы
             await db.execute('DELETE FROM incomes WHERE user_id = ?', (user_id,))

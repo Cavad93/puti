@@ -141,98 +141,93 @@ class FinancialAIAgent:
                 messages=self.conversations[user_id]
             )
 
-            # Собрать все блоки ответа
-            assistant_content = []
-            tool_uses = []
+            # Инициализация переменных для ответа
             text_response = ""
             image_path = None
 
-            # Первый проход: собрать все блоки
-            for block in response.content:
-                if block.type == "text":
-                    text_response += block.text
-                    assistant_content.append({"type": "text", "text": block.text})
-                elif block.type == "tool_use":
-                    tool_uses.append(block)
-                    assistant_content.append({
-                        "type": "tool_use",
-                        "id": block.id,
-                        "name": block.name,
-                        "input": block.input
+            # Обработка tool_use в цикле (может быть несколько раундов)
+            current_response = response
+
+            while True:
+                # Собрать tool_use блоки из текущего ответа
+                current_tool_uses = []
+                current_assistant_content = []
+
+                for block in current_response.content:
+                    if block.type == "text":
+                        if block.text:  # Добавить только непустой текст
+                            text_response += block.text
+                            current_assistant_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        current_tool_uses.append(block)
+                        current_assistant_content.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": block.input
+                        })
+
+                # Если есть tool_use - обработать
+                if current_tool_uses:
+                    # Добавить assistant message
+                    self.conversations[user_id].append({
+                        "role": "assistant",
+                        "content": current_assistant_content
                     })
 
-            # Если есть tool_use блоки - обработать их
-            if tool_uses:
-                # Добавить assistant message с tool_use блоками
-                self.conversations[user_id].append({
-                    "role": "assistant",
-                    "content": assistant_content
-                })
+                    # Выполнить все инструменты
+                    tool_results_content = []
+                    for tool_block in current_tool_uses:
+                        tool_name = tool_block.name
+                        tool_input = tool_block.input
+                        tool_use_id = tool_block.id
 
-                # Выполнить все инструменты и собрать результаты
-                tool_results_content = []
-                for tool_block in tool_uses:
-                    tool_name = tool_block.name
-                    tool_input = tool_block.input
-                    tool_use_id = tool_block.id
+                        # Выполнить инструмент
+                        tool_result = await self.tools.execute_tool(tool_name, tool_input, user_id)
 
-                    # Выполнить инструмент
-                    tool_result = await self.tools.execute_tool(tool_name, tool_input, user_id)
+                        # Сохранить последнюю транзакцию
+                        if tool_name in ["add_income", "add_expense", "add_loan_payment"]:
+                            self.last_transactions[user_id] = {
+                                "tool": tool_name,
+                                "input": tool_input,
+                                "result": tool_result
+                            }
 
-                    # Сохранить последнюю транзакцию
-                    if tool_name in ["add_income", "add_expense", "add_loan_payment"]:
-                        self.last_transactions[user_id] = {
-                            "tool": tool_name,
-                            "input": tool_input,
-                            "result": tool_result
-                        }
+                        # Проверить наличие изображения
+                        if isinstance(tool_result, dict) and tool_result.get('image_path'):
+                            image_path = tool_result['image_path']
 
-                    # Проверить наличие изображения в результате
-                    if isinstance(tool_result, dict) and tool_result.get('image_path'):
-                        image_path = tool_result['image_path']
+                        # Добавить результат
+                        tool_results_content.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_id,
+                            "content": str(tool_result)
+                        })
 
-                    # Добавить результат в список
-                    tool_results_content.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": str(tool_result)
+                    # Добавить все tool_result
+                    self.conversations[user_id].append({
+                        "role": "user",
+                        "content": tool_results_content
                     })
 
-                # Добавить все tool_result в одно user message
-                self.conversations[user_id].append({
-                    "role": "user",
-                    "content": tool_results_content
-                })
+                    # Получить следующий ответ
+                    current_response = self.client.messages.create(
+                        model=self.model,
+                        max_tokens=2048,
+                        system=self._get_system_prompt(),
+                        tools=self.tools.get_tools_definition(),
+                        messages=self.conversations[user_id]
+                    )
+                    # Цикл продолжится для обработки нового ответа
 
-                # Получить финальный ответ Claude после выполнения всех инструментов
-                follow_up = self.client.messages.create(
-                    model=self.model,
-                    max_tokens=2048,
-                    system=self._get_system_prompt(),
-                    tools=self.tools.get_tools_definition(),
-                    messages=self.conversations[user_id]
-                )
-
-                # Обработать follow-up ответ
-                follow_up_text = ""
-                for fu_block in follow_up.content:
-                    if fu_block.type == "text":
-                        follow_up_text += fu_block.text
-
-                text_response += follow_up_text
-
-                # Сохранить follow-up в историю
-                self.conversations[user_id].append({
-                    "role": "assistant",
-                    "content": follow_up.content
-                })
-
-            else:
-                # Нет tool_use - просто сохранить ответ
-                self.conversations[user_id].append({
-                    "role": "assistant",
-                    "content": response.content
-                })
+                else:
+                    # Нет больше tool_use - сохранить финальный ответ и выйти
+                    if current_assistant_content:  # Только если есть контент
+                        self.conversations[user_id].append({
+                            "role": "assistant",
+                            "content": current_response.content
+                        })
+                    break
 
             return text_response, image_path
 

@@ -25,6 +25,7 @@ class FinancialAIAgent:
     def _get_system_prompt(self, user_id: int) -> str:
         """Системный промпт для AI-агента"""
         user_name = get_user_name(user_id)
+        current_date = datetime.now().strftime('%Y-%m-%d')
 
         # Получить список других пользователей
         other_users = [f"{name} (ID: {uid})" for uid, name in USER_NAMES.items() if uid != user_id]
@@ -134,9 +135,7 @@ class FinancialAIAgent:
 
 ТЕКУЩАЯ ДАТА: {current_date}
 
-Используй инструменты (tools) для выполнения операций. Не придумывай данные - только то, что сказал пользователь.""".format(
-            current_date=datetime.now().strftime('%Y-%m-%d')
-        )
+Используй инструменты (tools) для выполнения операций. Не придумывай данные - только то, что сказал пользователь."""
 
     async def chat(self, user_id: int, message: str) -> tuple[str, Optional[str]]:
         """

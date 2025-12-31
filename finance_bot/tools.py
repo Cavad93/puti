@@ -302,11 +302,12 @@ class FinancialTools:
             },
             {
                 "name": "delete_loan",
-                "description": "Удалить кредит из системы полностью. Используй когда пользователь хочет удалить кредит",
+                "description": "Удалить кредит из системы полностью. Используй когда пользователь хочет удалить кредит. Если найдено несколько одинаковых записей (дубликаты), удалит все автоматически.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "loan_identifier": {"type": "string", "description": "Название банка или ID кредита"}
+                        "loan_identifier": {"type": "string", "description": "Название банка или ID кредита"},
+                        "delete_all_duplicates": {"type": "boolean", "description": "Если true, удалит все найденные одинаковые кредиты. Используй когда пользователь говорит 'удали все', 'удали этот кредит полностью', 'удали дубликаты'"}
                     },
                     "required": ["loan_identifier"]
                 }
@@ -1073,6 +1074,7 @@ class FinancialTools:
     async def _delete_loan(self, user_id: int, input_data: Dict) -> Dict:
         """Удалить кредит"""
         loan_identifier = input_data.get('loan_identifier', '')
+        delete_all = input_data.get('delete_all_duplicates', False)
 
         # Найти кредит
         loans = await self.db.get_loan_by_name(user_id, loan_identifier)
@@ -1083,13 +1085,40 @@ class FinancialTools:
                 "error": f"Кредит '{loan_identifier}' не найден"
             }
 
+        # Если несколько кредитов
         if len(loans) > 1:
-            loan_list = "\n".join([f"- {loan['name']} (остаток: {loan['current_balance']:,.0f} руб)" for loan in loans])
-            return {
-                "success": False,
-                "error": f"Найдено несколько кредитов. Уточните:\n{loan_list}"
-            }
+            # Проверить все ли идентичные (дубликаты)
+            first_loan = loans[0]
+            all_identical = all(
+                loan['name'] == first_loan['name'] and
+                loan['current_balance'] == first_loan['current_balance'] and
+                loan['interest_rate'] == first_loan['interest_rate'] and
+                loan['monthly_payment'] == first_loan['monthly_payment']
+                for loan in loans
+            )
 
+            # Если все идентичные или пользователь явно попросил удалить все
+            if all_identical or delete_all:
+                # Удалить все кредиты
+                deleted_count = 0
+                for loan in loans:
+                    success = await self.db.delete_loan(loan['id'])
+                    if success:
+                        deleted_count += 1
+
+                return {
+                    "success": True,
+                    "message": f"✅ Удалено {deleted_count} записей кредита '{first_loan['name']}' (дубликаты)"
+                }
+            else:
+                # Разные кредиты - попросить уточнить
+                loan_list = "\n".join([f"- {loan['name']} (остаток: {loan['current_balance']:,.0f} руб)" for loan in loans])
+                return {
+                    "success": False,
+                    "error": f"Найдено несколько разных кредитов. Уточните какой удалить:\n{loan_list}"
+                }
+
+        # Один кредит - удалить
         loan = loans[0]
         loan_name = loan['name']
 

@@ -579,3 +579,43 @@ class Database:
                 ORDER BY e.date DESC
             ''', (user_id, month, year)) as cursor:
                 return await cursor.fetchall()
+
+    # ===== LOAN HOLIDAYS (КРЕДИТНЫЕ КАНИКУЛЫ) =====
+    async def add_loan_holiday(self, loan_id: int, start_date: str, end_date: str, notes: str = None):
+        """Добавить кредитные каникулы"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO loan_holidays (loan_id, start_date, end_date, notes)
+                VALUES (?, ?, ?, ?)
+            ''', (loan_id, start_date, end_date, notes))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_loan_holidays(self, loan_id: int):
+        """Получить все каникулы по кредиту"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM loan_holidays WHERE loan_id = ? ORDER BY start_date',
+                (loan_id,)
+            ) as cursor:
+                return await cursor.fetchall()
+
+    async def mark_holiday_recalculated(self, holiday_id: int):
+        """Отметить что каникулы учтены в графике"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE loan_holidays SET recalculated = 1 WHERE id = ?',
+                (holiday_id,)
+            )
+            await db.commit()
+
+    async def get_active_holiday_for_loan(self, loan_id: int, current_date: str):
+        """Проверить активны ли каникулы для кредита на текущую дату"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT * FROM loan_holidays
+                WHERE loan_id = ? AND ? BETWEEN start_date AND end_date
+            ''', (loan_id, current_date)) as cursor:
+                return await cursor.fetchone()

@@ -235,6 +235,32 @@ class FinancialTools:
                     },
                     "required": []
                 }
+            },
+            {
+                "name": "calculate_early_payment",
+                "description": "Рассчитать выгоду от досрочного погашения кредита. Показывает сколько можно сэкономить и на сколько месяцев быстрее выплатить",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "loan_identifier": {"type": "string", "description": "Название банка или ID кредита"},
+                        "extra_payment": {"type": "number", "description": "Сумма досрочного погашения"}
+                    },
+                    "required": ["loan_identifier", "extra_payment"]
+                }
+            },
+            {
+                "name": "set_loan_holiday",
+                "description": "Установить кредитные каникулы для кредита. Используй когда пользователь говорит об оформлении каникул по кредиту",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "loan_identifier": {"type": "string", "description": "Название банка или ID кредита"},
+                        "start_date": {"type": "string", "description": "Дата начала каникул (YYYY-MM-DD)"},
+                        "end_date": {"type": "string", "description": "Дата окончания каникул (YYYY-MM-DD)"},
+                        "notes": {"type": "string", "description": "Примечания (опционально)"}
+                    },
+                    "required": ["loan_identifier", "start_date", "end_date"]
+                }
             }
         ]
 
@@ -275,6 +301,10 @@ class FinancialTools:
                 return await self._get_budget_status(user_id, tool_input)
             elif tool_name == "get_planned_expenses":
                 return await self._get_planned_expenses(user_id, tool_input)
+            elif tool_name == "calculate_early_payment":
+                return await self._calculate_early_payment(user_id, tool_input)
+            elif tool_name == "set_loan_holiday":
+                return await self._set_loan_holiday(user_id, tool_input)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -695,10 +725,97 @@ class FinancialTools:
         ]
         
         total_planned = sum(p['amount'] for p in planned)
-        
+
         return {
             "success": True,
             "planned_expenses": planned_list,
             "total_amount": total_planned,
             "count": len(planned)
+        }
+
+    async def _calculate_early_payment(self, user_id: int, input_data: Dict) -> Dict:
+        """Рассчитать выгоду от досрочного погашения"""
+        # Найти кредит
+        loans = await self.db.get_active_loans(user_id)
+        loan_identifier = input_data['loan_identifier'].lower()
+
+        matching_loan = None
+        for loan in loans:
+            if loan_identifier in loan['name'].lower():
+                matching_loan = loan
+                break
+
+        if not matching_loan:
+            return {
+                "success": False,
+                "error": f"Кредит '{input_data['loan_identifier']}' не найден"
+            }
+
+        # Рассчитать выгоду
+        extra_payment = input_data['extra_payment']
+        result = self.calculator.calculate_early_repayment(
+            current_balance=matching_loan['current_balance'],
+            rate=matching_loan['interest_rate'],
+            monthly_payment=matching_loan['monthly_payment'],
+            extra_payment=extra_payment
+        )
+
+        report_text = f"📊 РАСЧЕТ ДОСРОЧНОГО ПОГАШЕНИЯ\n\n"
+        report_text += f"Кредит: {matching_loan['name']}\n"
+        report_text += f"Текущий остаток: {matching_loan['current_balance']:,.2f} руб.\n"
+        report_text += f"Досрочный платеж: {extra_payment:,.2f} руб.\n\n"
+        report_text += f"РЕЗУЛЬТАТ:\n"
+        report_text += f"  Новый остаток: {result['new_balance']:,.2f} руб.\n"
+        report_text += f"  Экономия месяцев: {result['months_saved']} мес.\n"
+        report_text += f"  Экономия денег: {result['money_saved']:,.2f} руб.\n"
+        report_text += f"  Осталось платить: {result['remaining_months']} мес.\n\n"
+        report_text += f"💡 Общая переплата БЕЗ досрочки: {result['total_payments_before']:,.2f} руб.\n"
+        report_text += f"💡 Общая переплата С досрочкой: {result['total_payments_after']:,.2f} руб.\n"
+
+        return {
+            "success": True,
+            "message": report_text,
+            "calculation": result
+        }
+
+    async def _set_loan_holiday(self, user_id: int, input_data: Dict) -> Dict:
+        """Установить кредитные каникулы"""
+        # Найти кредит
+        loans = await self.db.get_active_loans(user_id)
+        loan_identifier = input_data['loan_identifier'].lower()
+
+        matching_loan = None
+        for loan in loans:
+            if loan_identifier in loan['name'].lower():
+                matching_loan = loan
+                break
+
+        if not matching_loan:
+            return {
+                "success": False,
+                "error": f"Кредит '{input_data['loan_identifier']}' не найден"
+            }
+
+        # Добавить каникулы
+        holiday_id = await self.db.add_loan_holiday(
+            loan_id=matching_loan['id'],
+            start_date=input_data['start_date'],
+            end_date=input_data['end_date'],
+            notes=input_data.get('notes')
+        )
+
+        # Пересчитать график с учетом каникул
+        from datetime import datetime
+        start = datetime.strptime(input_data['start_date'], '%Y-%m-%d')
+        end = datetime.strptime(input_data['end_date'], '%Y-%m-%d')
+        months_holiday = (end.year - start.year) * 12 + end.month - start.month
+
+        return {
+            "success": True,
+            "holiday_id": holiday_id,
+            "message": f"✅ Кредитные каникулы установлены для '{matching_loan['name']}'\n"
+                      f"Период: {input_data['start_date']} — {input_data['end_date']}\n"
+                      f"Продолжительность: {months_holiday} мес.\n\n"
+                      f"⚠️ График платежей будет продлён на {months_holiday} мес.\n"
+                      f"💡 Проценты продолжат начисляться во время каникул"
         }

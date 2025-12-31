@@ -1,9 +1,9 @@
 """
-Главный файл Telegram бота для управления финансами
+Финансовый Telegram бот с AI-агентом
+Управление через естественный диалог
 """
 import logging
-import asyncio
-from datetime import datetime, time as datetime_time
+from datetime import time as datetime_time
 import pytz
 
 from telegram import Update
@@ -11,24 +11,12 @@ from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
-    ConversationHandler,
     filters,
 )
 
 from config import TELEGRAM_BOT_TOKEN, ALLOWED_USER_IDS, TIMEZONE, REMINDER_HOUR, REMINDER_MINUTE
 from database import Database
-from keyboards import Keyboards
-from utils import ClaudeAdvisor, FinancialCalculator, ReportGenerator
-
-# Импорт обработчиков
-from handlers.base_handler import BaseHandler
-from handlers.loan_handler import LoanHandler
-from handlers.expense_handler import ExpenseHandler
-from handlers.income_handler import IncomeHandler
-from handlers.report_handler import ReportHandler
-from handlers.ai_handler import AIHandler
-from handlers.budget_handler import BudgetHandler
+from ai_agent import FinancialAIAgent
 
 # Настройка логирования
 logging.basicConfig(
@@ -39,23 +27,11 @@ logger = logging.getLogger(__name__)
 
 
 class FinanceBot:
-    """Основной класс финансового бота"""
+    """Финансовый бот с AI-агентом"""
 
     def __init__(self):
         self.db = Database()
-        self.keyboards = Keyboards()
-        self.claude = ClaudeAdvisor()
-        self.calculator = FinancialCalculator()
-        self.reporter = ReportGenerator()
-
-        # Инициализация обработчиков
-        self.base_handler = BaseHandler(self.db, self.keyboards)
-        self.loan_handler = LoanHandler(self.db, self.keyboards, self.calculator, self.claude)
-        self.expense_handler = ExpenseHandler(self.db, self.keyboards)
-        self.income_handler = IncomeHandler(self.db, self.keyboards)
-        self.report_handler = ReportHandler(self.db, self.keyboards, self.reporter)
-        self.ai_handler = AIHandler(self.db, self.keyboards, self.claude, self.calculator)
-        self.budget_handler = BudgetHandler(self.db, self.keyboards, self.claude)
+        self.ai_agent = FinancialAIAgent()
 
     def check_access(self, user_id: int) -> bool:
         """Проверка доступа пользователя"""
@@ -64,13 +40,135 @@ class FinanceBot:
             return False
         return user_id in ALLOWED_USER_IDS
 
-    async def access_denied(self, update: Update, context):
-        """Обработчик отказа в доступе"""
-        await update.message.reply_text(
-            "⛔ У вас нет доступа к этому боту.\n\n"
-            f"Ваш ID: {update.effective_user.id}\n"
-            "Обратитесь к администратору."
-        )
+    async def start(self, update: Update, context):
+        """Команда /start или просто 'начать'"""
+        user = update.effective_user
+
+        if not self.check_access(user.id):
+            await update.message.reply_text(
+                "⛔ У вас нет доступа к этому боту.\n\n"
+                f"Ваш ID: {user.id}\n"
+                "Обратитесь к администратору."
+            )
+            return
+
+        # Добавить пользователя в БД
+        await self.db.add_user(user.id, user.username, user.first_name)
+
+        welcome_text = f"""Привет, {user.first_name}! 👋
+
+Я твой AI-помощник для управления финансами. Просто пиши мне как обычному человеку:
+
+📝 Примеры:
+• "35000 на кредит в Сбере"
+• "590 за кофе"
+• "Получил зарплату 85000"
+• "У меня кредит в Альфе 300к под 16%"
+• "Сколько я потратил на кофе?"
+• "Покажи мои долги"
+• "Это ошибка, удали"
+
+Я понимаю естественный язык и помогу:
+✅ Вести учёт доходов и расходов
+✅ Управлять кредитами
+✅ Планировать бюджет
+✅ Выбраться из долгов
+✅ Накопить подушку безопасности
+
+Пиши всё как есть, я пойму! 💪"""
+
+        await update.message.reply_text(welcome_text)
+
+    async def help_command(self, update: Update, context):
+        """Команда /help или 'помощь'"""
+        help_text = """📚 КАК ПОЛЬЗОВАТЬСЯ БОТОМ
+
+Просто пиши мне обычными фразами:
+
+💰 ДОХОДЫ:
+"Зарплата 85000"
+"Получил подработку 15000"
+"Вернули долг 5000"
+
+📊 РАСХОДЫ:
+"590 за кофе"
+"2500 на продукты"
+"Купил одежду за 8000"
+
+💳 КРЕДИТЫ:
+"У меня кредит в Сбере 500к под 18%"
+"Ежемесячный платёж 15000"
+"35000 на кредит в Альфе"
+
+📈 ОТЧЁТЫ:
+"Покажи расходы за месяц"
+"Сколько я потратил на кофе?"
+"Какие у меня долги?"
+"Когда расплачусь с кредитами?"
+
+✏️ ИСПРАВЛЕНИЯ:
+"Это ошибка, удали"
+"Измени сумму, внёс неверно"
+
+Я всё понимаю и помогаю! 🤖"""
+
+        await update.message.reply_text(help_text)
+
+    async def clear_history(self, update: Update, context):
+        """Очистить историю разговора"""
+        user_id = update.effective_user.id
+        self.ai_agent.clear_history(user_id)
+        await update.message.reply_text("🗑️ История разговора очищена")
+
+    async def handle_message(self, update: Update, context):
+        """Обработка всех текстовых сообщений"""
+        user = update.effective_user
+
+        # Проверка доступа
+        if not self.check_access(user.id):
+            await update.message.reply_text(
+                f"⛔ Доступ запрещён. Ваш ID: {user.id}"
+            )
+            return
+
+        message_text = update.message.text.lower().strip()
+
+        # Обработка текстовых команд
+        if message_text in ['начать', 'start', '/start']:
+            await self.start(update, context)
+            return
+        elif message_text in ['помощь', 'help', '/help']:
+            await self.help_command(update, context)
+            return
+        elif message_text in ['очистить', 'очистить историю', 'clear']:
+            await self.clear_history(update, context)
+            return
+
+        # Показать что бот печатает
+        await update.message.chat.send_action(action="typing")
+
+        # Отправить сообщение AI-агенту
+        try:
+            response_text, image_path = await self.ai_agent.chat(user.id, update.message.text)
+
+            # Отправить текстовый ответ
+            if response_text:
+                await update.message.reply_text(response_text)
+
+            # Отправить изображение если есть
+            if image_path:
+                try:
+                    with open(image_path, 'rb') as photo:
+                        await update.message.reply_photo(photo=photo)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки изображения: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка обработки сообщения: {e}", exc_info=True)
+            await update.message.reply_text(
+                "❌ Произошла ошибка при обработке запроса.\n"
+                "Попробуйте переформулировать или напишите 'помощь'"
+            )
 
     async def send_daily_reminder(self, context):
         """Отправка ежедневного напоминания"""
@@ -79,82 +177,15 @@ class FinanceBot:
                 await context.bot.send_message(
                     chat_id=user_id,
                     text="⏰ Время вносить данные за день!\n\n"
-                         "Не забудьте записать:\n"
-                         "• Все доходы\n"
-                         "• Все расходы\n"
-                         "• Платежи по кредитам\n\n"
+                         "Просто напиши мне что потратил и получил сегодня.\n"
+                         "Например:\n"
+                         "• 1500 на продукты\n"
+                         "• 250 за кофе\n"
+                         "• 15000 на кредит в Сбере\n\n"
                          "Финансовая дисциплина - ключ к свободе! 💪"
                 )
             except Exception as e:
                 logger.error(f"Ошибка отправки напоминания пользователю {user_id}: {e}")
-
-    def setup_handlers(self, app: Application):
-        """Настройка обработчиков команд"""
-
-        # Фильтр доступа
-        def access_filter(func):
-            async def wrapper(update: Update, context):
-                if not self.check_access(update.effective_user.id):
-                    await self.access_denied(update, context)
-                    return
-                return await func(update, context)
-            return wrapper
-
-        # Базовые команды
-        app.add_handler(CommandHandler("start", access_filter(self.base_handler.start)))
-        app.add_handler(CommandHandler("help", access_filter(self.base_handler.help)))
-        app.add_handler(CommandHandler("menu", access_filter(self.base_handler.menu)))
-
-        # Обработчик текстовых сообщений главного меню
-        app.add_handler(MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            access_filter(self.base_handler.handle_main_menu)
-        ))
-
-        # Обработчик callback кнопок
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.base_handler.handle_callback),
-            pattern="^back_main$"
-        ))
-
-        # Callback для остальных модулей
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.loan_handler.handle_callback),
-            pattern="^(loan|pay|early|schedule|holiday|close|debt_strategy)_"
-        ))
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.expense_handler.handle_callback),
-            pattern="^(expense|regular)_"
-        ))
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.income_handler.handle_callback),
-            pattern="^income_"
-        ))
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.report_handler.handle_callback),
-            pattern="^(report|period)_"
-        ))
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.ai_handler.handle_callback),
-            pattern="^ai_"
-        ))
-        app.add_handler(CallbackQueryHandler(
-            access_filter(self.budget_handler.handle_callback),
-            pattern="^(budget|create_budget|show_budget|financial_goals)_"
-        ))
-
-        # Обработчик ошибок
-        app.add_error_handler(self.error_handler)
-
-    async def error_handler(self, update: Update, context):
-        """Обработка ошибок"""
-        logger.error(f"Ошибка: {context.error}", exc_info=context.error)
-
-        if update and update.effective_message:
-            await update.effective_message.reply_text(
-                "❌ Произошла ошибка при обработке команды.\n"
-                "Попробуйте еще раз или обратитесь к администратору."
-            )
 
     async def post_init(self, app: Application):
         """Инициализация после запуска"""
@@ -174,18 +205,38 @@ class FinanceBot:
         )
         logger.info(f"Ежедневное напоминание настроено на {REMINDER_HOUR}:{REMINDER_MINUTE:02d} {TIMEZONE}")
 
+    async def error_handler(self, update: Update, context):
+        """Обработка ошибок"""
+        logger.error(f"Ошибка: {context.error}", exc_info=context.error)
+
+        if update and update.effective_message:
+            await update.effective_message.reply_text(
+                "❌ Произошла ошибка. Попробуйте ещё раз или напишите 'помощь'"
+            )
+
     def run(self):
         """Запуск бота"""
-        logger.info("Запуск финансового бота...")
+        logger.info("Запуск AI финансового бота...")
 
         # Создание приложения
         app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(self.post_init).build()
 
-        # Настройка обработчиков
-        self.setup_handlers(app)
+        # Обработчики
+        app.add_handler(CommandHandler("start", self.start))
+        app.add_handler(CommandHandler("help", self.help_command))
+        app.add_handler(CommandHandler("clear", self.clear_history))
+
+        # Основной обработчик всех текстовых сообщений
+        app.add_handler(MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            self.handle_message
+        ))
+
+        # Обработчик ошибок
+        app.add_error_handler(self.error_handler)
 
         # Запуск бота
-        logger.info("Бот запущен!")
+        logger.info("AI бот запущен! Готов к работе 🤖")
         app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 

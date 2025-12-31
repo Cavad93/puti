@@ -326,6 +326,53 @@ class Database:
             )
             await db.commit()
 
+    async def update_loan(self, loan_id: int, **kwargs):
+        """Обновить параметры кредита"""
+        allowed_fields = {
+            'name', 'current_balance', 'interest_rate', 'monthly_payment',
+            'payment_day', 'end_date', 'principal_amount'
+        }
+
+        # Фильтруем только разрешенные поля
+        updates = {k: v for k, v in kwargs.items() if k in allowed_fields and v is not None}
+
+        if not updates:
+            return False
+
+        # Формируем SQL запрос
+        set_clause = ', '.join([f"{field} = ?" for field in updates.keys()])
+        values = list(updates.values()) + [loan_id]
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f'UPDATE loans SET {set_clause} WHERE id = ?',
+                values
+            )
+            await db.commit()
+            return True
+
+    async def delete_loan(self, loan_id: int):
+        """Удалить кредит полностью (вместе со всеми платежами и каникулами)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Удалить связанные платежи
+            await db.execute('DELETE FROM loan_payments WHERE loan_id = ?', (loan_id,))
+            # Удалить связанные каникулы
+            await db.execute('DELETE FROM loan_holidays WHERE loan_id = ?', (loan_id,))
+            # Удалить сам кредит
+            await db.execute('DELETE FROM loans WHERE id = ?', (loan_id,))
+            await db.commit()
+            return True
+
+    async def get_loan_by_name(self, user_id: int, name: str):
+        """Найти кредит по названию (частичное совпадение)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM loans WHERE user_id = ? AND name LIKE ? AND is_active = 1',
+                (user_id, f'%{name}%')
+            ) as cursor:
+                return await cursor.fetchall()
+
     # ===== CREDIT CARDS =====
     async def add_credit_card(self, user_id: int, bank_name: str, credit_limit: float,
                              interest_rate: float, card_name: str = None,
@@ -360,6 +407,48 @@ class Database:
                 (new_balance, card_id)
             )
             await db.commit()
+
+    async def update_credit_card(self, card_id: int, **kwargs):
+        """Обновить параметры кредитной карты"""
+        allowed_fields = {
+            'bank_name', 'card_name', 'credit_limit', 'current_balance',
+            'interest_rate', 'grace_period_days', 'minimum_payment_percent', 'payment_day'
+        }
+
+        # Фильтруем только разрешенные поля
+        updates = {k: v for k, v in kwargs.items() if k in allowed_fields and v is not None}
+
+        if not updates:
+            return False
+
+        # Формируем SQL запрос
+        set_clause = ', '.join([f"{field} = ?" for field in updates.keys()])
+        values = list(updates.values()) + [card_id]
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f'UPDATE credit_cards SET {set_clause} WHERE id = ?',
+                values
+            )
+            await db.commit()
+            return True
+
+    async def delete_credit_card(self, card_id: int):
+        """Удалить кредитную карту полностью"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('DELETE FROM credit_cards WHERE id = ?', (card_id,))
+            await db.commit()
+            return True
+
+    async def get_card_by_bank(self, user_id: int, bank_name: str):
+        """Найти кредитную карту по названию банка (частичное совпадение)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM credit_cards WHERE user_id = ? AND bank_name LIKE ? AND is_active = 1',
+                (user_id, f'%{bank_name}%')
+            ) as cursor:
+                return await cursor.fetchall()
 
     # ===== LOAN PAYMENTS =====
     async def add_loan_payment(self, loan_id: int, amount: float, payment_date: str,

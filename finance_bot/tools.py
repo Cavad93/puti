@@ -283,6 +283,59 @@ class FinancialTools:
                     },
                     "required": []
                 }
+            },
+            {
+                "name": "update_loan",
+                "description": "Обновить параметры существующего кредита. Используй когда пользователь хочет изменить данные кредита (сумму, ставку, платеж и т.д.)",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "loan_identifier": {"type": "string", "description": "Название банка или ID кредита для поиска"},
+                        "name": {"type": "string", "description": "Новое название (опционально)"},
+                        "current_balance": {"type": "number", "description": "Текущий остаток долга (опционально)"},
+                        "interest_rate": {"type": "number", "description": "Новая процентная ставка (опционально)"},
+                        "monthly_payment": {"type": "number", "description": "Новый ежемесячный платёж (опционально)"},
+                        "payment_day": {"type": "integer", "description": "Новый день платежа (опционально)"}
+                    },
+                    "required": ["loan_identifier"]
+                }
+            },
+            {
+                "name": "delete_loan",
+                "description": "Удалить кредит из системы полностью. Используй когда пользователь хочет удалить кредит",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "loan_identifier": {"type": "string", "description": "Название банка или ID кредита"}
+                    },
+                    "required": ["loan_identifier"]
+                }
+            },
+            {
+                "name": "update_credit_card",
+                "description": "Обновить параметры кредитной карты. Используй когда пользователь хочет изменить данные карты",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "bank_name": {"type": "string", "description": "Название банка для поиска карты"},
+                        "current_balance": {"type": "number", "description": "Текущий долг по карте (опционально)"},
+                        "credit_limit": {"type": "number", "description": "Новый кредитный лимит (опционально)"},
+                        "interest_rate": {"type": "number", "description": "Новая процентная ставка (опционально)"},
+                        "payment_day": {"type": "integer", "description": "Новый день платежа (опционально)"}
+                    },
+                    "required": ["bank_name"]
+                }
+            },
+            {
+                "name": "delete_credit_card",
+                "description": "Удалить кредитную карту из системы полностью",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "bank_name": {"type": "string", "description": "Название банка"}
+                    },
+                    "required": ["bank_name"]
+                }
             }
         ]
 
@@ -331,6 +384,14 @@ class FinancialTools:
                 return await self._connect_bank_api(user_id, tool_input)
             elif tool_name == "sync_bank_operations":
                 return await self._sync_bank_operations(user_id, tool_input)
+            elif tool_name == "update_loan":
+                return await self._update_loan(user_id, tool_input)
+            elif tool_name == "delete_loan":
+                return await self._delete_loan(user_id, tool_input)
+            elif tool_name == "update_credit_card":
+                return await self._update_credit_card(user_id, tool_input)
+            elif tool_name == "delete_credit_card":
+                return await self._delete_credit_card(user_id, tool_input)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -937,3 +998,189 @@ class FinancialTools:
             "imported_count": imported_count,
             "unprocessed_count": len(unprocessed)
         }
+
+    async def _update_loan(self, user_id: int, input_data: Dict) -> Dict:
+        """Обновить кредит"""
+        loan_identifier = input_data.get('loan_identifier', '')
+
+        # Найти кредит
+        loans = await self.db.get_loan_by_name(user_id, loan_identifier)
+
+        if not loans:
+            return {
+                "success": False,
+                "error": f"Кредит '{loan_identifier}' не найден"
+            }
+
+        if len(loans) > 1:
+            loan_list = "\n".join([f"- {loan['name']} (остаток: {loan['current_balance']:,.0f} руб)" for loan in loans])
+            return {
+                "success": False,
+                "error": f"Найдено несколько кредитов. Уточните:\n{loan_list}"
+            }
+
+        loan = loans[0]
+        loan_id = loan['id']
+
+        # Собрать параметры для обновления
+        updates = {}
+        if 'name' in input_data:
+            updates['name'] = input_data['name']
+        if 'current_balance' in input_data:
+            updates['current_balance'] = input_data['current_balance']
+        if 'interest_rate' in input_data:
+            updates['interest_rate'] = input_data['interest_rate']
+        if 'monthly_payment' in input_data:
+            updates['monthly_payment'] = input_data['monthly_payment']
+        if 'payment_day' in input_data:
+            updates['payment_day'] = input_data['payment_day']
+
+        if not updates:
+            return {
+                "success": False,
+                "error": "Не указано ни одного параметра для обновления"
+            }
+
+        # Обновить
+        success = await self.db.update_loan(loan_id, **updates)
+
+        if success:
+            updated_fields = ", ".join(updates.keys())
+            return {
+                "success": True,
+                "message": f"✅ Кредит '{loan['name']}' обновлен (изменены поля: {updated_fields})"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Не удалось обновить кредит"
+            }
+
+    async def _delete_loan(self, user_id: int, input_data: Dict) -> Dict:
+        """Удалить кредит"""
+        loan_identifier = input_data.get('loan_identifier', '')
+
+        # Найти кредит
+        loans = await self.db.get_loan_by_name(user_id, loan_identifier)
+
+        if not loans:
+            return {
+                "success": False,
+                "error": f"Кредит '{loan_identifier}' не найден"
+            }
+
+        if len(loans) > 1:
+            loan_list = "\n".join([f"- {loan['name']} (остаток: {loan['current_balance']:,.0f} руб)" for loan in loans])
+            return {
+                "success": False,
+                "error": f"Найдено несколько кредитов. Уточните:\n{loan_list}"
+            }
+
+        loan = loans[0]
+        loan_name = loan['name']
+
+        # Удалить
+        success = await self.db.delete_loan(loan['id'])
+
+        if success:
+            return {
+                "success": True,
+                "message": f"✅ Кредит '{loan_name}' удалён из системы"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Не удалось удалить кредит"
+            }
+
+    async def _update_credit_card(self, user_id: int, input_data: Dict) -> Dict:
+        """Обновить кредитную карту"""
+        bank_name = input_data.get('bank_name', '')
+
+        # Найти карту
+        cards = await self.db.get_card_by_bank(user_id, bank_name)
+
+        if not cards:
+            return {
+                "success": False,
+                "error": f"Кредитная карта '{bank_name}' не найдена"
+            }
+
+        if len(cards) > 1:
+            card_list = "\n".join([f"- {card['bank_name']} (долг: {card['current_balance']:,.0f} руб)" for card in cards])
+            return {
+                "success": False,
+                "error": f"Найдено несколько карт. Уточните:\n{card_list}"
+            }
+
+        card = cards[0]
+        card_id = card['id']
+
+        # Собрать параметры для обновления
+        updates = {}
+        if 'current_balance' in input_data:
+            updates['current_balance'] = input_data['current_balance']
+        if 'credit_limit' in input_data:
+            updates['credit_limit'] = input_data['credit_limit']
+        if 'interest_rate' in input_data:
+            updates['interest_rate'] = input_data['interest_rate']
+        if 'payment_day' in input_data:
+            updates['payment_day'] = input_data['payment_day']
+
+        if not updates:
+            return {
+                "success": False,
+                "error": "Не указано ни одного параметра для обновления"
+            }
+
+        # Обновить
+        success = await self.db.update_credit_card(card_id, **updates)
+
+        if success:
+            updated_fields = ", ".join(updates.keys())
+            return {
+                "success": True,
+                "message": f"✅ Кредитная карта '{card['bank_name']}' обновлена (изменены поля: {updated_fields})"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Не удалось обновить карту"
+            }
+
+    async def _delete_credit_card(self, user_id: int, input_data: Dict) -> Dict:
+        """Удалить кредитную карту"""
+        bank_name = input_data.get('bank_name', '')
+
+        # Найти карту
+        cards = await self.db.get_card_by_bank(user_id, bank_name)
+
+        if not cards:
+            return {
+                "success": False,
+                "error": f"Кредитная карта '{bank_name}' не найдена"
+            }
+
+        if len(cards) > 1:
+            card_list = "\n".join([f"- {card['bank_name']} (долг: {card['current_balance']:,.0f} руб)" for card in cards])
+            return {
+                "success": False,
+                "error": f"Найдено несколько карт. Уточните:\n{card_list}"
+            }
+
+        card = cards[0]
+        card_name = card['bank_name']
+
+        # Удалить
+        success = await self.db.delete_credit_card(card['id'])
+
+        if success:
+            return {
+                "success": True,
+                "message": f"✅ Кредитная карта '{card_name}' удалена из системы"
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Не удалось удалить карту"
+            }

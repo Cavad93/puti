@@ -4,7 +4,7 @@ AI-агент для разговорного управления финанс�
 import anthropic
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from config import CLAUDE_API_KEY, CLAUDE_MODEL
+from config import CLAUDE_API_KEY, CLAUDE_MODEL, get_user_name, USER_NAMES
 from tools import FinancialTools
 
 
@@ -22,9 +22,20 @@ class FinancialAIAgent:
         # Хранение последних транзакций для возможности отмены
         self.last_transactions: Dict[int, Dict] = {}
 
-    def _get_system_prompt(self) -> str:
+    def _get_system_prompt(self, user_id: int) -> str:
         """Системный промпт для AI-агента"""
-        return """Ты персональный финансовый помощник с AI. Твоя задача - помогать пользователю управлять финансами через естественный диалог.
+        user_name = get_user_name(user_id)
+
+        # Получить список других пользователей
+        other_users = [f"{name} (ID: {uid})" for uid, name in USER_NAMES.items() if uid != user_id]
+        other_users_text = ", ".join(other_users) if other_users else "нет других пользователей"
+
+        return f"""Ты персональный финансовый помощник с AI. Твоя задача - помогать пользователю управлять финансами через естественный диалог.
+
+ИНФОРМАЦИЯ О ПОЛЬЗОВАТЕЛЕ:
+- Ты общаешься с: {user_name} (ID: {user_id})
+- Другие пользователи системы: {other_users_text}
+- Бюджет общий для всех пользователей, но система отслеживает кто сколько потратил
 
 ТВОИ ВОЗМОЖНОСТИ:
 1. Понимать естественный язык:
@@ -81,9 +92,12 @@ class FinancialAIAgent:
    - ЗАПЛАНИРОВАННЫЕ РАСХОДЫ: понимай фразы "через 5 месяцев вернуть долг Стасу", "23.02.2026 подарок сестре 10000"
 
 7. ОБЩИЙ БЮДЖЕТ для 2 пользователей:
-   - Бюджет общий, но система отслеживает кто сколько потратил
+   - Бюджет общий для {user_name} и других пользователей системы
+   - Система отслеживает кто сколько потратил (каждый расход привязан к пользователю)
    - Оба пользователя могут вносить расходы
-   - При запросе можно показать расходы каждого отдельно
+   - При запросе "покажи мои расходы" → показывай только расходы {user_name}
+   - При запросе "покажи расходы [другого пользователя]" → показывай расходы того пользователя
+   - При запросе общих расходов → показывай сумму обоих пользователей
 
 8. ИНТЕГРАЦИЯ С Т-БАНКОМ (НОВОЕ!):
    - Понимай фразы: "Подключи мою карту Т-Банка", "Добавь API токен ..."
@@ -150,7 +164,7 @@ class FinancialAIAgent:
             response = self.client.messages.create(
                 model=self.model,
                 max_tokens=4096,
-                system=self._get_system_prompt(),
+                system=self._get_system_prompt(user_id),
                 tools=self.tools.get_tools_definition(),
                 messages=self.conversations[user_id]
             )
@@ -228,7 +242,7 @@ class FinancialAIAgent:
                     current_response = self.client.messages.create(
                         model=self.model,
                         max_tokens=2048,
-                        system=self._get_system_prompt(),
+                        system=self._get_system_prompt(user_id),
                         tools=self.tools.get_tools_definition(),
                         messages=self.conversations[user_id]
                     )

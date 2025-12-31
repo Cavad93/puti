@@ -10,6 +10,16 @@ load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 ALLOWED_USER_IDS = [int(uid) for uid in os.getenv('ALLOWED_USER_IDS', '').split(',') if uid.strip()]
 
+# Имена пользователей (для персонализации и отчетов)
+USER_NAMES = {
+    939056216: 'Джавад',
+    497894337: 'Рустем'
+}
+
+def get_user_name(user_id: int) -> str:
+    """Получить имя пользователя по ID"""
+    return USER_NAMES.get(user_id, f'Пользователь {user_id}')
+
 # Claude API
 CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY')
 CLAUDE_MODEL = 'claude-haiku-4-5'  # Claude Haiku 4.5 - быстрая и дешевая модель (в 3 раза дешевле Sonnet)

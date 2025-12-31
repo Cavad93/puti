@@ -106,19 +106,91 @@ class FinanceBot:
 "Какие у меня долги?"
 "Когда расплачусь с кредитами?"
 
-✏️ ИСПРАВЛЕНИЯ:
-"Это ошибка, удали"
-"Измени сумму, внёс неверно"
+✏️ РЕДАКТИРОВАНИЕ:
+"Измени сумму в Почта Банке на 1455000"
+"Обнови ставку по кредиту в Сбере"
+"Удали кредит в Альфе"
+
+🔧 СПЕЦИАЛЬНЫЕ КОМАНДЫ:
+• "очистить" - очистить историю диалога (данные НЕ удаляются!)
+• "удалить всё" - ПОЛНОСТЬЮ удалить все данные (с подтверждением)
 
 Я всё понимаю и помогаю! 🤖"""
 
         await update.message.reply_text(help_text)
 
     async def clear_history(self, update: Update, context):
-        """Очистить историю разговора"""
+        """Очистить историю разговора (НЕ удаляет данные!)"""
         user_id = update.effective_user.id
         self.ai_agent.clear_history(user_id)
-        await update.message.reply_text("🗑️ История разговора очищена")
+        await update.message.reply_text(
+            "🗑️ **История диалога очищена**\n\n"
+            "✅ Все ваши данные сохранены:\n"
+            "• Кредиты\n"
+            "• Расходы и доходы\n"
+            "• Платежи\n"
+            "• Бюджеты\n\n"
+            "Очищена только память последних сообщений для AI.",
+            parse_mode="Markdown"
+        )
+
+    async def request_delete_all_data(self, update: Update, context):
+        """Запрос на удаление всех данных (первый шаг)"""
+        user_id = update.effective_user.id
+
+        # Установить флаг ожидания подтверждения
+        if 'user_data' not in context.bot_data:
+            context.bot_data['user_data'] = {}
+        context.bot_data['user_data'][user_id] = {'awaiting_delete_confirmation': True}
+
+        await update.message.reply_text(
+            "⚠️ **ВНИМАНИЕ! ОПАСНАЯ ОПЕРАЦИЯ!** ⚠️\n\n"
+            "Вы собираетесь **БЕЗВОЗВРАТНО УДАЛИТЬ ВСЕ** свои данные:\n"
+            "❌ Все кредиты и займы\n"
+            "❌ Все кредитные карты\n"
+            "❌ Все расходы и доходы\n"
+            "❌ Все платежи\n"
+            "❌ Все бюджеты\n"
+            "❌ Историю банковских операций\n\n"
+            "**Это действие НЕВОЗМОЖНО отменить!**\n\n"
+            "Если вы уверены, напишите точно:\n"
+            "`подтверждаю удаление`\n\n"
+            "Для отмены напишите что-то другое.",
+            parse_mode="Markdown"
+        )
+
+    async def confirm_delete_all_data(self, update: Update, context):
+        """Подтверждение удаления всех данных (второй шаг)"""
+        user_id = update.effective_user.id
+
+        # Проверить что запрос был инициирован
+        user_data = context.bot_data.get('user_data', {}).get(user_id, {})
+        if not user_data.get('awaiting_delete_confirmation'):
+            await update.message.reply_text(
+                "❌ Нет активного запроса на удаление.\n"
+                "Если хотите удалить все данные, сначала напишите 'удалить всё'."
+            )
+            return
+
+        # Удалить все данные
+        try:
+            await self.db.delete_all_user_data(user_id)
+            self.ai_agent.clear_history(user_id)
+
+            # Очистить флаг ожидания
+            context.bot_data['user_data'][user_id] = {}
+
+            await update.message.reply_text(
+                "✅ **Все данные удалены**\n\n"
+                "База данных полностью очищена.\n"
+                "Вы можете начать заново с командой /start"
+            )
+        except Exception as e:
+            logger.error(f"Ошибка удаления данных: {e}", exc_info=True)
+            await update.message.reply_text(
+                "❌ Произошла ошибка при удалении данных.\n"
+                "Попробуйте позже или обратитесь к администратору."
+            )
 
     async def handle_message(self, update: Update, context):
         """Обработка всех текстовых сообщений"""
@@ -142,6 +214,12 @@ class FinanceBot:
             return
         elif message_text in ['очистить', 'очистить историю', 'clear']:
             await self.clear_history(update, context)
+            return
+        elif message_text in ['удалить всё', 'удалить все данные', 'удалить все']:
+            await self.request_delete_all_data(update, context)
+            return
+        elif message_text == 'подтверждаю удаление':
+            await self.confirm_delete_all_data(update, context)
             return
 
         # Показать что бот печатает

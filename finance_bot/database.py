@@ -854,3 +854,54 @@ class Database:
                 other_users = await cursor.fetchall()
                 # Это упрощенная проверка - в реальности нужно сравнивать счета
                 return len(other_users) > 0
+
+    async def delete_all_user_data(self, user_id: int):
+        """
+        ОПАСНО! Удалить ВСЕ данные пользователя из базы.
+        Используется только при явном запросе пользователя.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            # Удалить все записи связанные с пользователем
+            # В порядке зависимостей (сначала зависимые таблицы)
+
+            # Платежи по кредитам
+            await db.execute('''
+                DELETE FROM loan_payments
+                WHERE loan_id IN (SELECT id FROM loans WHERE user_id = ?)
+            ''', (user_id,))
+
+            # Кредитные каникулы
+            await db.execute('''
+                DELETE FROM loan_holidays
+                WHERE loan_id IN (SELECT id FROM loans WHERE user_id = ?)
+            ''', (user_id,))
+
+            # Банковские транзакции
+            await db.execute('DELETE FROM bank_transactions WHERE user_id = ?', (user_id,))
+
+            # Отслеживание расходов пользователя
+            await db.execute('DELETE FROM user_expense_tracking WHERE user_id = ?', (user_id,))
+
+            # Запланированные расходы
+            await db.execute('DELETE FROM planned_expenses WHERE user_id = ?', (user_id,))
+
+            # Категории бюджета
+            await db.execute('DELETE FROM budget_categories WHERE user_id = ?', (user_id,))
+
+            # Доходы
+            await db.execute('DELETE FROM incomes WHERE user_id = ?', (user_id,))
+
+            # Расходы
+            await db.execute('DELETE FROM expenses WHERE user_id = ?', (user_id,))
+
+            # Кредитные карты
+            await db.execute('DELETE FROM credit_cards WHERE user_id = ?', (user_id,))
+
+            # Кредиты
+            await db.execute('DELETE FROM loans WHERE user_id = ?', (user_id,))
+
+            # Банковские интеграции
+            await db.execute('DELETE FROM bank_integrations WHERE user_id = ?', (user_id,))
+
+            await db.commit()
+            return True

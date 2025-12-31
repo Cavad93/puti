@@ -261,6 +261,28 @@ class FinancialTools:
                     },
                     "required": ["loan_identifier", "start_date", "end_date"]
                 }
+            },
+            {
+                "name": "connect_bank_api",
+                "description": "Подключить API Т-Банка. Используй когда пользователь хочет добавить банковскую интеграцию и предоставляет API токен",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "api_token": {"type": "string", "description": "API токен от Т-Банка"}
+                    },
+                    "required": ["api_token"]
+                }
+            },
+            {
+                "name": "sync_bank_operations",
+                "description": "Синхронизировать операции из Т-Банка. Загружает последние операции и предлагает пользователю классифицировать их",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer", "description": "Количество дней для синхронизации (по умолчанию 7)"}
+                    },
+                    "required": []
+                }
             }
         ]
 
@@ -305,6 +327,10 @@ class FinancialTools:
                 return await self._calculate_early_payment(user_id, tool_input)
             elif tool_name == "set_loan_holiday":
                 return await self._set_loan_holiday(user_id, tool_input)
+            elif tool_name == "connect_bank_api":
+                return await self._connect_bank_api(user_id, tool_input)
+            elif tool_name == "sync_bank_operations":
+                return await self._sync_bank_operations(user_id, tool_input)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -818,4 +844,96 @@ class FinancialTools:
                       f"Продолжительность: {months_holiday} мес.\n\n"
                       f"⚠️ График платежей будет продлён на {months_holiday} мес.\n"
                       f"💡 Проценты продолжат начисляться во время каникул"
+        }
+
+    async def _connect_bank_api(self, user_id: int, input_data: Dict) -> Dict:
+        """Подключить API Т-Банка"""
+        api_token = input_data['api_token']
+
+        # Сохранить интеграцию
+        integration_id = await self.db.add_bank_integration(
+            user_id=user_id,
+            bank_name='T-Bank',
+            api_token=api_token
+        )
+
+        return {
+            "success": True,
+            "integration_id": integration_id,
+            "message": f"✅ API Т-Банка успешно подключён!\n\n"
+                      f"Теперь можете использовать команду для синхронизации операций.\n"
+                      f"Напишите: 'Синхронизируй операции за последнюю неделю'"
+        }
+
+    async def _sync_bank_operations(self, user_id: int, input_data: Dict) -> Dict:
+        """Синхронизировать операции из Т-Банка"""
+        from tbank_api import TBankAPI
+
+        # Получить интеграцию
+        integration = await self.db.get_user_bank_integration(user_id, 'T-Bank')
+
+        if not integration:
+            return {
+                "success": False,
+                "error": "❌ API Т-Банка не подключён.\n\nСначала подключите API: 'Подключи API Т-Банка <токен>'"
+            }
+
+        # Создать клиент
+        api_client = TBankAPI(integration['api_token'])
+
+        # Синхронизировать
+        days = input_data.get('days', 7)
+        operations = await api_client.sync_recent_operations(days)
+
+        if not operations:
+            return {
+                "success": True,
+                "message": f"ℹ️ Нет новых операций за последние {days} дней"
+            }
+
+        # Импортировать операции
+        imported_count = 0
+        for op in operations:
+            parsed = api_client.parse_operation(op)
+
+            # Проверить не является ли это внутренним переводом
+            if parsed.get('counterparty_account'):
+                is_internal = await self.db.check_if_internal_transfer(
+                    user_id,
+                    parsed['counterparty_account']
+                )
+                if is_internal:
+                    continue  # Игнорировать переводы между пользователями бота
+
+            await self.db.add_bank_transaction(
+                integration_id=integration['id'],
+                user_id=user_id,
+                operation_data=parsed
+            )
+            imported_count += 1
+
+        # Обновить дату синхронизации
+        await self.db.update_integration_sync_date(integration['id'])
+
+        # Получить необработанные операции для показа пользователю
+        unprocessed = await self.db.get_unprocessed_transactions(user_id, limit=5)
+
+        message = f"✅ Синхронизировано {imported_count} операций из Т-Банка\n\n"
+
+        if unprocessed:
+            message += f"📋 Необработанные операции (показаны первые 5):\n\n"
+            for idx, tx in enumerate(unprocessed, 1):
+                op_type = "➕ Доход" if tx['operation_type'] == 'income' else "➖ Расход"
+                message += f"{idx}. {op_type} {tx['amount']:,.2f} руб.\n"
+                message += f"   {tx['description']}\n"
+                message += f"   Дата: {tx['operation_date'][:10]}\n\n"
+
+            message += "\n💡 Скажите как классифицировать каждую операцию\n"
+            message += "Например: 'Первая операция - это продукты' или 'Вторую игнорируй'"
+
+        return {
+            "success": True,
+            "message": message,
+            "imported_count": imported_count,
+            "unprocessed_count": len(unprocessed)
         }

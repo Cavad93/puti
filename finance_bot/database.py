@@ -217,6 +217,53 @@ class Database:
                 )
             ''')
 
+            # Таблица интеграций с банками
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bank_integrations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    bank_name TEXT NOT NULL,
+                    api_token TEXT NOT NULL,
+                    is_active BOOLEAN DEFAULT 1,
+                    last_sync_date TIMESTAMP,
+                    sync_enabled BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    UNIQUE(user_id, bank_name)
+                )
+            ''')
+
+            # Таблица импортированных банковских операций
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS bank_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    integration_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    operation_id TEXT NOT NULL,
+                    operation_date TIMESTAMP NOT NULL,
+                    amount REAL NOT NULL,
+                    currency TEXT DEFAULT 'RUB',
+                    operation_type TEXT NOT NULL,
+                    description TEXT,
+                    category TEXT,
+                    mcc_code TEXT,
+                    counterparty_name TEXT,
+                    counterparty_account TEXT,
+                    is_processed BOOLEAN DEFAULT 0,
+                    is_ignored BOOLEAN DEFAULT 0,
+                    linked_expense_id INTEGER,
+                    linked_income_id INTEGER,
+                    ai_classification TEXT,
+                    needs_clarification BOOLEAN DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (integration_id) REFERENCES bank_integrations(id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    FOREIGN KEY (linked_expense_id) REFERENCES expenses(id),
+                    FOREIGN KEY (linked_income_id) REFERENCES incomes(id),
+                    UNIQUE(integration_id, operation_id)
+                )
+            ''')
+
             await db.commit()
 
     # ===== USERS =====
@@ -619,3 +666,102 @@ class Database:
                 WHERE loan_id = ? AND ? BETWEEN start_date AND end_date
             ''', (loan_id, current_date)) as cursor:
                 return await cursor.fetchone()
+
+    # ===== BANK INTEGRATIONS (ИНТЕГРАЦИЯ С БАНКАМИ) =====
+    async def add_bank_integration(self, user_id: int, bank_name: str, api_token: str):
+        """Добавить интеграцию с банком"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT OR REPLACE INTO bank_integrations (user_id, bank_name, api_token, is_active, sync_enabled)
+                VALUES (?, ?, ?, 1, 1)
+            ''', (user_id, bank_name, api_token))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_user_bank_integration(self, user_id: int, bank_name: str = 'T-Bank'):
+        """Получить интеграцию пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM bank_integrations WHERE user_id = ? AND bank_name = ? AND is_active = 1',
+                (user_id, bank_name)
+            ) as cursor:
+                return await cursor.fetchone()
+
+    async def update_integration_sync_date(self, integration_id: int):
+        """Обновить дату последней синхронизации"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE bank_integrations SET last_sync_date = CURRENT_TIMESTAMP WHERE id = ?',
+                (integration_id,)
+            )
+            await db.commit()
+
+    async def add_bank_transaction(self, integration_id: int, user_id: int, operation_data: dict):
+        """Добавить банковскую операцию"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT OR IGNORE INTO bank_transactions
+                (integration_id, user_id, operation_id, operation_date, amount, currency,
+                 operation_type, description, category, mcc_code, counterparty_name, counterparty_account)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                integration_id, user_id,
+                operation_data['operation_id'],
+                operation_data['operation_date'],
+                operation_data['amount'],
+                operation_data.get('currency', 'RUB'),
+                operation_data['operation_type'],
+                operation_data.get('description'),
+                operation_data.get('category'),
+                operation_data.get('mcc_code'),
+                operation_data.get('counterparty_name'),
+                operation_data.get('counterparty_account')
+            ))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_unprocessed_transactions(self, user_id: int, limit: int = 50):
+        """Получить необработанные банковские операции"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT * FROM bank_transactions
+                WHERE user_id = ? AND is_processed = 0 AND is_ignored = 0
+                ORDER BY operation_date DESC
+                LIMIT ?
+            ''', (user_id, limit)) as cursor:
+                return await cursor.fetchall()
+
+    async def mark_transaction_processed(self, transaction_id: int, expense_id: int = None, income_id: int = None):
+        """Отметить транзакцию как обработанную"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE bank_transactions
+                SET is_processed = 1, linked_expense_id = ?, linked_income_id = ?
+                WHERE id = ?
+            ''', (expense_id, income_id, transaction_id))
+            await db.commit()
+
+    async def mark_transaction_ignored(self, transaction_id: int):
+        """Отметить транзакцию как игнорируемую"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE bank_transactions SET is_ignored = 1 WHERE id = ?',
+                (transaction_id,)
+            )
+            await db.commit()
+
+    async def check_if_internal_transfer(self, user_id: int, counterparty_account: str):
+        """Проверить является ли операция переводом между пользователями бота"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            # Проверяем есть ли другой пользователь бота с такой же интеграцией
+            async with db.execute('''
+                SELECT u.user_id FROM users u
+                JOIN bank_integrations bi ON u.user_id = bi.user_id
+                WHERE u.user_id != ? AND bi.is_active = 1
+            ''', (user_id,)) as cursor:
+                other_users = await cursor.fetchall()
+                # Это упрощенная проверка - в реальности нужно сравнивать счета
+                return len(other_users) > 0

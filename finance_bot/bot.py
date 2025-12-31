@@ -55,6 +55,11 @@ class FinanceBot:
         # Добавить пользователя в БД
         await self.db.add_user(user.id, user.username, user.first_name)
 
+        # Инициализировать отслеживание обновлений остатков
+        update_status = await self.db.get_debt_update_status(user.id)
+        if not update_status:
+            await self.db.init_debt_balance_tracking(user.id)
+
         welcome_text = f"""Привет, {user.first_name}! 👋
 
 Я твой AI-помощник для управления финансами. Просто пиши мне как обычному человеку:
@@ -205,6 +210,63 @@ class FinanceBot:
 
         message_text = update.message.text.lower().strip()
 
+        # Проверить состояние процесса обновления остатков
+        user_data = context.bot_data.get('user_data', {}).get(user.id, {})
+        if user_data.get('updating_balances'):
+            # Проверить на "пропустить"
+            if message_text in ['пропустить', 'пропустить долг', 'skip', 'далее']:
+                # Пропустить текущий долг
+                debts = user_data['debts_to_update']
+                current_index = user_data['current_debt_index']
+                current_index += 1
+                user_data['current_debt_index'] = current_index
+
+                if current_index < len(debts):
+                    next_debt = debts[current_index]
+                    response = (
+                        f"⏭️ Пропущено.\n\n"
+                        f"**{current_index + 1}/{len(debts)}** - {next_debt['name']}\n"
+                        f"Текущий остаток в системе: {next_debt['current_balance']:,.0f} руб.\n\n"
+                        f"💬 Напишите **актуальный остаток долга** сейчас:"
+                    )
+                    await update.message.reply_text(response, parse_mode="Markdown")
+                    return
+                else:
+                    # Все обновлены/пропущены
+                    await self.db.update_debt_balance_date(user.id)
+                    del context.bot_data['user_data'][user.id]
+                    await update.message.reply_text(
+                        "✅ Обновление завершено!\n\nСледующая проверка через 3 месяца."
+                    )
+                    return
+
+            # Обработать ответ с остатком
+            response = await self.handle_balance_update_response(user.id, update.message.text, context)
+            if response:
+                await update.message.reply_text(response, parse_mode="Markdown")
+                return
+
+        # Проверить на запрос обновления остатков
+        if any(phrase in message_text for phrase in ['да, обновить остатки', 'готов обновить', 'готов', 'да обновить']):
+            # Проверить не обновлялись ли уже недавно
+            update_status = await self.db.get_debt_update_status(user.id)
+            if update_status:
+                message = await self.start_balance_update_process(user.id, context)
+                await update.message.reply_text(message, parse_mode="Markdown")
+                return
+            else:
+                # Инициализировать отслеживание
+                await self.db.init_debt_balance_tracking(user.id)
+                message = await self.start_balance_update_process(user.id, context)
+                await update.message.reply_text(message, parse_mode="Markdown")
+                return
+
+        if message_text in ['позже', 'не сейчас', 'потом']:
+            await update.message.reply_text(
+                "Хорошо, напомню через неделю. Напишите **\"обновить остатки\"** когда будете готовы."
+            )
+            return
+
         # Обработка текстовых команд
         if message_text in ['начать', 'start', '/start']:
             await self.start(update, context)
@@ -248,6 +310,161 @@ class FinanceBot:
                 "Попробуйте переформулировать или напишите 'помощь'"
             )
 
+    async def check_debt_balance_updates(self, context):
+        """Периодическая проверка необходимости обновления остатков долгов"""
+        logger.info("Проверка пользователей для обновления остатков долгов...")
+
+        try:
+            users_needing_update = await self.db.check_users_needing_update()
+
+            for user in users_needing_update:
+                user_id = user['user_id']
+                try:
+                    # Проверить есть ли у пользователя активные долги
+                    loans = await self.db.get_active_loans(user_id)
+                    cards = await self.db.get_active_credit_cards(user_id)
+
+                    if not loans and not cards:
+                        # Нет долгов - обновить дату без напоминания
+                        await self.db.update_debt_balance_date(user_id)
+                        continue
+
+                    # Отправить напоминание
+                    message = (
+                        "📊 **ВРЕМЯ ОБНОВИТЬ ОСТАТКИ ДОЛГОВ**\n\n"
+                        "Прошло 3 месяца с последнего обновления!\n\n"
+                        "Для точного отслеживания финансов нужно обновить текущие остатки по кредитам и картам.\n\n"
+                        "🔄 **Готовы обновить сейчас?**\n"
+                        "Напишите: **\"Да, обновить остатки\"** или **\"Готов\"**\n\n"
+                        "⏭️ Пропустить: **\"Позже\"** или **\"Не сейчас\"**"
+                    )
+
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text=message,
+                        parse_mode="Markdown"
+                    )
+                    logger.info(f"Отправлено напоминание об обновлении остатков пользователю {user_id}")
+
+                except Exception as e:
+                    logger.error(f"Ошибка отправки напоминания пользователю {user_id}: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка проверки обновлений остатков: {e}")
+
+    async def start_balance_update_process(self, user_id: int, context):
+        """Запустить процесс последовательного обновления остатков"""
+        # Получить все долги пользователя
+        loans = await self.db.get_active_loans(user_id)
+        cards = await self.db.get_active_credit_cards(user_id)
+
+        # Создать список долгов для обновления
+        debts_to_update = []
+
+        for loan in loans:
+            debts_to_update.append({
+                'type': 'loan',
+                'id': loan['id'],
+                'name': loan['name'],
+                'current_balance': loan['current_balance']
+            })
+
+        for card in cards:
+            debts_to_update.append({
+                'type': 'card',
+                'id': card['id'],
+                'name': f"Карта {card['bank_name']}",
+                'current_balance': card['current_balance']
+            })
+
+        if not debts_to_update:
+            return "У вас нет активных долгов для обновления."
+
+        # Сохранить состояние в context
+        if 'user_data' not in context.bot_data:
+            context.bot_data['user_data'] = {}
+
+        context.bot_data['user_data'][user_id] = {
+            'updating_balances': True,
+            'debts_to_update': debts_to_update,
+            'current_debt_index': 0,
+            'updated_count': 0
+        }
+
+        # Начать с первого долга
+        first_debt = debts_to_update[0]
+        message = (
+            f"✅ Отлично! Давайте обновим остатки.\n\n"
+            f"**1/{len(debts_to_update)}** - {first_debt['name']}\n"
+            f"Текущий остаток в системе: {first_debt['current_balance']:,.0f} руб.\n\n"
+            f"💬 Напишите **актуальный остаток долга** сейчас:"
+        )
+
+        return message
+
+    async def handle_balance_update_response(self, user_id: int, message_text: str, context):
+        """Обработать ответ пользователя в процессе обновления остатков"""
+        user_data = context.bot_data['user_data'].get(user_id, {})
+
+        if not user_data.get('updating_balances'):
+            return None
+
+        debts = user_data['debts_to_update']
+        current_index = user_data['current_debt_index']
+        current_debt = debts[current_index]
+
+        # Попытаться распарсить сумму
+        try:
+            # Убрать все кроме цифр и точки/запятой
+            cleaned = message_text.replace(',', '').replace(' ', '').replace('руб', '').replace('.', '')
+            new_balance = float(cleaned)
+
+            # Обновить остаток в базе
+            if current_debt['type'] == 'loan':
+                await self.db.update_loan(current_debt['id'], current_balance=new_balance)
+            else:  # card
+                await self.db.update_credit_card(current_debt['id'], current_balance=new_balance)
+
+            user_data['updated_count'] += 1
+
+            # Перейти к следующему долгу
+            current_index += 1
+            user_data['current_debt_index'] = current_index
+
+            if current_index < len(debts):
+                # Есть еще долги
+                next_debt = debts[current_index]
+                response = (
+                    f"✅ Обновлено: {current_debt['name']} → {new_balance:,.0f} руб.\n\n"
+                    f"**{current_index + 1}/{len(debts)}** - {next_debt['name']}\n"
+                    f"Текущий остаток в системе: {next_debt['current_balance']:,.0f} руб.\n\n"
+                    f"💬 Напишите **актуальный остаток долга** сейчас:"
+                )
+                return response
+            else:
+                # Все долги обновлены
+                await self.db.update_debt_balance_date(user_id)
+
+                # Очистить состояние
+                del context.bot_data['user_data'][user_id]
+
+                response = (
+                    f"🎉 **Отлично! Все остатки обновлены!**\n\n"
+                    f"Обновлено долгов: {user_data['updated_count']}\n\n"
+                    f"Следующая проверка через 3 месяца.\n"
+                    f"Теперь ваши данные актуальны! 💪"
+                )
+                return response
+
+        except (ValueError, AttributeError) as e:
+            return (
+                f"❌ Не могу распознать сумму.\n\n"
+                f"Попробуйте написать просто число, например:\n"
+                f"• 150000\n"
+                f"• 1500000\n\n"
+                f"Или напишите **\"пропустить\"** чтобы оставить как есть."
+            )
+
     async def send_daily_reminder(self, context):
         """Отправка ежедневного напоминания"""
         for user_id in ALLOWED_USER_IDS:
@@ -282,6 +499,15 @@ class FinanceBot:
             name="daily_reminder"
         )
         logger.info(f"Ежедневное напоминание настроено на {REMINDER_HOUR}:{REMINDER_MINUTE:02d} {TIMEZONE}")
+
+        # Настройка проверки обновлений остатков долгов (раз в день в 10:00)
+        debt_check_time = datetime_time(hour=10, minute=0, tzinfo=tz)
+        job_queue.run_daily(
+            self.check_debt_balance_updates,
+            time=debt_check_time,
+            name="debt_balance_check"
+        )
+        logger.info(f"Проверка обновлений остатков долгов настроена на 10:00 {TIMEZONE}")
 
     async def error_handler(self, update: Update, context):
         """Обработка ошибок"""

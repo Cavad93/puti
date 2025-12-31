@@ -267,6 +267,20 @@ class Database:
                 )
             ''')
 
+            # Таблица отслеживания обновлений остатков долгов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS debt_balance_updates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    last_update_date DATE NOT NULL,
+                    next_update_date DATE NOT NULL,
+                    update_interval_months INTEGER DEFAULT 3,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    UNIQUE(user_id)
+                )
+            ''')
+
             # Таблица импортированных банковских операций
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS bank_transactions (
@@ -1045,6 +1059,73 @@ class Database:
                     return result[0] / result[1]  # current_amount / monthly_expenses
                 return 0
 
+    # ===== DEBT BALANCE UPDATES (ОБНОВЛЕНИЕ ОСТАТКОВ ДОЛГОВ) =====
+    async def init_debt_balance_tracking(self, user_id: int, interval_months: int = 3):
+        """Инициализировать отслеживание обновлений остатков для пользователя"""
+        from datetime import datetime, timedelta
+        from dateutil.relativedelta import relativedelta
+
+        async with aiosqlite.connect(self.db_path) as db:
+            current_date = datetime.now().date()
+            next_update = current_date + relativedelta(months=interval_months)
+
+            await db.execute('''
+                INSERT OR REPLACE INTO debt_balance_updates
+                (user_id, last_update_date, next_update_date, update_interval_months)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, current_date.strftime('%Y-%m-%d'), next_update.strftime('%Y-%m-%d'), interval_months))
+            await db.commit()
+
+    async def get_debt_update_status(self, user_id: int):
+        """Получить статус обновления остатков для пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM debt_balance_updates WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                return await cursor.fetchone()
+
+    async def check_users_needing_update(self):
+        """Получить список пользователей, которым нужно обновить остатки"""
+        from datetime import datetime
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            current_date = datetime.now().date().strftime('%Y-%m-%d')
+
+            async with db.execute('''
+                SELECT u.user_id, u.username, u.first_name, dbu.last_update_date, dbu.next_update_date
+                FROM users u
+                JOIN debt_balance_updates dbu ON u.user_id = dbu.user_id
+                WHERE dbu.next_update_date <= ?
+            ''', (current_date,)) as cursor:
+                return await cursor.fetchall()
+
+    async def update_debt_balance_date(self, user_id: int):
+        """Обновить дату последнего обновления остатков"""
+        from datetime import datetime
+        from dateutil.relativedelta import relativedelta
+
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получить текущий интервал
+            async with db.execute(
+                'SELECT update_interval_months FROM debt_balance_updates WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                result = await cursor.fetchone()
+                interval_months = result[0] if result else 3
+
+            current_date = datetime.now().date()
+            next_update = current_date + relativedelta(months=interval_months)
+
+            await db.execute('''
+                UPDATE debt_balance_updates
+                SET last_update_date = ?, next_update_date = ?
+                WHERE user_id = ?
+            ''', (current_date.strftime('%Y-%m-%d'), next_update.strftime('%Y-%m-%d'), user_id))
+            await db.commit()
+
     async def delete_all_user_data(self, user_id: int):
         """
         ОПАСНО! Удалить ВСЕ данные пользователя из базы.
@@ -1081,6 +1162,9 @@ class Database:
                 WHERE goal_id IN (SELECT id FROM savings_goals WHERE user_id = ?)
             ''', (user_id,))
             await db.execute('DELETE FROM savings_goals WHERE user_id = ?', (user_id,))
+
+            # Отслеживание обновлений остатков
+            await db.execute('DELETE FROM debt_balance_updates WHERE user_id = ?', (user_id,))
 
             # Категории бюджета - НЕ удаляем, т.к. бюджет общий для всех пользователей
             # Если нужно удалить бюджет, это делается вручную через отдельную команду

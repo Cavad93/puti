@@ -349,6 +349,52 @@ class FinancialTools:
                     },
                     "required": ["loan_name"]
                 }
+            },
+            {
+                "name": "set_savings_goal",
+                "description": "Создать или обновить цель подушки безопасности. Используй когда пользователь хочет начать копить подушку безопасности",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "target_months": {"type": "integer", "description": "На сколько месяцев расходов копить (обычно 3-6 месяцев)"},
+                        "monthly_expenses": {"type": "number", "description": "Среднемесячные обязательные расходы"}
+                    },
+                    "required": ["target_months", "monthly_expenses"]
+                }
+            },
+            {
+                "name": "add_to_savings",
+                "description": "Пополнить или снять деньги с подушки безопасности. Используй когда пользователь вносит деньги в подушку или снимает",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "amount": {"type": "number", "description": "Сумма для пополнения (положительная) или снятия (положительная, но transaction_type='withdrawal')"},
+                        "transaction_type": {"type": "string", "description": "Тип операции: deposit (пополнение) или withdrawal (снятие)"},
+                        "description": {"type": "string", "description": "Описание операции (опционально)"},
+                        "date": {"type": "string", "description": "Дата в формате YYYY-MM-DD (по умолчанию сегодня)"}
+                    },
+                    "required": ["amount", "transaction_type"]
+                }
+            },
+            {
+                "name": "get_savings_status",
+                "description": "Получить статус подушки безопасности: текущий баланс, цель, прогресс. Используй когда пользователь спрашивает о подушке безопасности",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "calculate_money_distribution",
+                "description": "Рассчитать умное распределение денег между подушкой безопасности и долгами. Используй когда пользователь спрашивает как распределить деньги или получил доход",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "available_money": {"type": "number", "description": "Сумма денег доступная для распределения"}
+                    },
+                    "required": ["available_money"]
+                }
             }
         ]
 
@@ -407,6 +453,14 @@ class FinancialTools:
                 return await self._delete_credit_card(user_id, tool_input)
             elif tool_name == "remove_duplicate_loans":
                 return await self._remove_duplicate_loans(user_id, tool_input)
+            elif tool_name == "set_savings_goal":
+                return await self._set_savings_goal(user_id, tool_input)
+            elif tool_name == "add_to_savings":
+                return await self._add_to_savings(user_id, tool_input)
+            elif tool_name == "get_savings_status":
+                return await self._get_savings_status(user_id)
+            elif tool_name == "calculate_money_distribution":
+                return await self._calculate_money_distribution(user_id, tool_input)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -1271,3 +1325,214 @@ class FinancialTools:
                 "success": False,
                 "error": "Не удалось удалить дубликаты"
             }
+
+    # ===== EMERGENCY FUND / SAVINGS (ПОДУШКА БЕЗОПАСНОСТИ) =====
+
+    async def _set_savings_goal(self, user_id: int, input_data: Dict) -> Dict:
+        """Создать цель подушки безопасности"""
+        target_months = input_data['target_months']
+        monthly_expenses = input_data['monthly_expenses']
+
+        # Создать цель
+        goal_id = await self.db.add_savings_goal(user_id, target_months, monthly_expenses)
+
+        target_amount = target_months * monthly_expenses
+
+        return {
+            "success": True,
+            "message": f"✅ Создана цель подушки безопасности!\n\n"
+                      f"🎯 Цель: {target_amount:,.0f} руб. ({target_months} мес. × {monthly_expenses:,.0f} руб.)\n"
+                      f"📊 Текущий баланс: 0 руб.\n"
+                      f"💪 Начинайте копить! Система будет помогать распределять деньги оптимально."
+        }
+
+    async def _add_to_savings(self, user_id: int, input_data: Dict) -> Dict:
+        """Пополнить или снять деньги с подушки безопасности"""
+        amount = input_data['amount']
+        transaction_type = input_data['transaction_type']
+        description = input_data.get('description', '')
+        date = input_data.get('date', datetime.now().strftime('%Y-%m-%d'))
+
+        # Получить активную цель
+        goal = await self.db.get_active_savings_goal(user_id)
+
+        if not goal:
+            return {
+                "success": False,
+                "error": "❌ У вас нет активной цели подушки безопасности. Сначала создайте цель командой 'Хочу копить подушку безопасности'."
+            }
+
+        # Добавить транзакцию
+        await self.db.add_to_savings(
+            user_id=user_id,
+            goal_id=goal['id'],
+            amount=amount,
+            date=date,
+            transaction_type=transaction_type,
+            description=description
+        )
+
+        # Получить обновленные данные
+        updated_goal = await self.db.get_active_savings_goal(user_id)
+        current_amount = updated_goal['current_amount']
+        target_amount = updated_goal['target_amount']
+        progress_percent = (current_amount / target_amount * 100) if target_amount > 0 else 0
+        months_covered = await self.db.calculate_months_covered(user_id)
+
+        if transaction_type == 'deposit':
+            emoji = "💰"
+            action = "Пополнение"
+        else:
+            emoji = "📤"
+            action = "Снятие"
+
+        return {
+            "success": True,
+            "message": f"{emoji} {action} подушки безопасности: {amount:,.0f} руб.\n\n"
+                      f"📊 Текущий баланс: {current_amount:,.0f} руб.\n"
+                      f"🎯 Цель: {target_amount:,.0f} руб.\n"
+                      f"📈 Прогресс: {progress_percent:.1f}%\n"
+                      f"🛡️ Покрытие: {months_covered:.1f} мес. расходов"
+        }
+
+    async def _get_savings_status(self, user_id: int) -> Dict:
+        """Получить статус подушки безопасности"""
+        # Получить активную цель
+        goal = await self.db.get_active_savings_goal(user_id)
+
+        if not goal:
+            return {
+                "success": True,
+                "message": "💡 У вас пока нет подушки безопасности.\n\n"
+                          "Подушка безопасности - это деньги на 3-6 месяцев обязательных расходов. "
+                          "Она защищает от потери работы, болезни или других непредвиденных ситуаций.\n\n"
+                          "Хотите начать копить? Скажите мне сколько у вас обязательных расходов в месяц."
+            }
+
+        current_amount = goal['current_amount']
+        target_amount = goal['target_amount']
+        target_months = goal['target_months']
+        monthly_expenses = goal['monthly_expenses']
+        progress_percent = (current_amount / target_amount * 100) if target_amount > 0 else 0
+        months_covered = await self.db.calculate_months_covered(user_id)
+
+        # Определить статус
+        if months_covered < 1:
+            status_emoji = "⚠️"
+            status_text = "КРИТИЧНО"
+            advice = "У вас нет даже месяца на жизнь! Начните копить срочно."
+        elif months_covered < 3:
+            status_emoji = "⏳"
+            status_text = "МАЛО"
+            advice = "Продолжайте копить до 3 месяцев минимум."
+        elif months_covered >= target_months:
+            status_emoji = "✅"
+            status_text = "ЦЕЛЬ ДОСТИГНУТА!"
+            advice = "Отличная работа! Можете сфокусироваться на погашении долгов."
+        else:
+            status_emoji = "💪"
+            status_text = "В ПРОЦЕССЕ"
+            advice = f"Осталось накопить {target_amount - current_amount:,.0f} руб. до цели."
+
+        # Получить историю
+        history = await self.db.get_savings_history(user_id, limit=5)
+        history_text = ""
+        if history:
+            history_text = "\n\n📜 Последние операции:\n"
+            for h in history:
+                date_str = h['date']
+                amount = h['amount']
+                trans_type = h['transaction_type']
+                emoji_t = "➕" if trans_type == 'deposit' else "➖"
+                history_text += f"  {emoji_t} {date_str}: {amount:,.0f} руб.\n"
+
+        return {
+            "success": True,
+            "message": f"{status_emoji} СТАТУС ПОДУШКИ БЕЗОПАСНОСТИ: {status_text}\n\n"
+                      f"💰 Текущий баланс: {current_amount:,.0f} руб.\n"
+                      f"🎯 Цель: {target_amount:,.0f} руб. ({target_months} мес.)\n"
+                      f"📈 Прогресс: {progress_percent:.1f}%\n"
+                      f"🛡️ Покрытие: {months_covered:.1f} мес. расходов\n"
+                      f"💡 {advice}{history_text}"
+        }
+
+    async def _calculate_money_distribution(self, user_id: int, input_data: Dict) -> Dict:
+        """Рассчитать умное распределение денег между подушкой и долгами"""
+        available_money = input_data['available_money']
+
+        # Получить данные подушки безопасности
+        savings = await self.db.get_savings_balance(user_id)
+
+        if not savings:
+            return {
+                "success": False,
+                "error": "❌ Сначала создайте цель подушки безопасности. Скажите мне сколько у вас обязательных расходов в месяц."
+            }
+
+        emergency_fund_current = savings['current_amount']
+        emergency_fund_target = savings['target_amount']
+        monthly_expenses = savings['monthly_expenses']
+
+        # Получить список долгов
+        loans = await self.db.get_active_loans(user_id)
+        cards = await self.db.get_active_credit_cards(user_id)
+
+        debts = []
+        for loan in loans:
+            debts.append({
+                'name': loan['name'],
+                'balance': loan['current_balance'],
+                'rate': loan['interest_rate'],
+                'monthly_payment': loan['monthly_payment']
+            })
+
+        for card in cards:
+            if card['current_balance'] > 0:
+                debts.append({
+                    'name': f"Карта {card['bank_name']}",
+                    'balance': card['current_balance'],
+                    'rate': card['interest_rate'],
+                    'monthly_payment': self.calculator.calculate_minimum_payment(card['current_balance'])
+                })
+
+        if not debts:
+            # Нет долгов - все деньги на подушку
+            return {
+                "success": True,
+                "message": f"💰 Распределение {available_money:,.0f} руб.:\n\n"
+                          f"✅ У вас нет долгов! Все деньги идут в подушку безопасности:\n"
+                          f"  💰 На подушку: {available_money:,.0f} руб.\n\n"
+                          f"После этого у вас будет: {emergency_fund_current + available_money:,.0f} руб."
+            }
+
+        # Рассчитать распределение
+        distribution = self.calculator.calculate_money_distribution(
+            available_money=available_money,
+            emergency_fund_current=emergency_fund_current,
+            emergency_fund_target=emergency_fund_target,
+            monthly_expenses=monthly_expenses,
+            debts=debts
+        )
+
+        # Сформировать сообщение
+        message = f"💰 УМНОЕ РАСПРЕДЕЛЕНИЕ {available_money:,.0f} РУБ.\n\n"
+        message += f"{distribution['reason']}\n\n"
+        message += f"📊 РЕКОМЕНДУЕМОЕ РАСПРЕДЕЛЕНИЕ:\n"
+        message += f"  💰 На подушку: {distribution['to_emergency_fund']:,.0f} руб.\n"
+        message += f"  💳 На долги: {distribution['to_debts']:,.0f} руб.\n\n"
+
+        if distribution['debt_distribution']:
+            message += f"📋 ДОЛГИ (в порядке приоритета):\n"
+            for debt in distribution['debt_distribution']:
+                message += f"  • {debt['name']} ({debt['rate']:.1f}%): {debt['amount']:,.0f} руб.\n"
+                message += f"    Останется: {debt['remaining_balance']:,.0f} руб.\n"
+
+        message += f"\n🛡️ ПОДУШКА БЕЗОПАСНОСТИ:\n"
+        message += f"  Было: {distribution['emergency_fund_before']:,.0f} руб. ({distribution['months_covered_before']:.1f} мес.)\n"
+        message += f"  Станет: {distribution['emergency_fund_after']:,.0f} руб. ({distribution['months_covered_after']:.1f} мес.)\n"
+        message += f"  До цели: {distribution['still_need_for_target']:,.0f} руб.\n"
+
+        return {
+            "success": True,
+            "message": message
+        }

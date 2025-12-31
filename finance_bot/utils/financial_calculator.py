@@ -343,3 +343,107 @@ class FinancialCalculator:
                 break
 
         return months
+
+    @staticmethod
+    def calculate_money_distribution(
+        available_money: float,
+        emergency_fund_current: float,
+        emergency_fund_target: float,
+        monthly_expenses: float,
+        debts: List[Dict]
+    ) -> Dict:
+        """
+        Умный расчет распределения денег между подушкой безопасности и долгами
+
+        Args:
+            available_money: Доступная сумма для распределения
+            emergency_fund_current: Текущий размер подушки безопасности
+            emergency_fund_target: Целевая сумма подушки безопасности
+            monthly_expenses: Месячные обязательные расходы
+            debts: Список долгов с полями: name, balance, rate, monthly_payment
+
+        Returns:
+            Словарь с рекомендациями по распределению
+        """
+        # Рассчитать на сколько месяцев хватит текущей подушки
+        months_covered = emergency_fund_current / monthly_expenses if monthly_expenses > 0 else 0
+
+        # Найти высокопроцентные долги (>25%)
+        high_interest_debts = [d for d in debts if d['rate'] > 25]
+        total_high_interest_debt = sum(d['balance'] for d in high_interest_debts)
+
+        # Определить стратегию распределения
+        strategy = ""
+        to_emergency_fund = 0
+        to_debts = 0
+        debt_distribution = []
+
+        if months_covered < 1:
+            # Критическая ситуация - нет даже месяца
+            # 50% на подушку, 50% на долги
+            strategy = "critical"
+            to_emergency_fund = available_money * 0.5
+            to_debts = available_money * 0.5
+            reason = "❗ У вас нет подушки безопасности даже на 1 месяц. Это критично!"
+
+        elif months_covered >= 1 and months_covered < 3 and high_interest_debts:
+            # Есть 1-3 месяца, но есть грабительские кредиты
+            # 20% на подушку, 80% на высокопроцентные долги
+            strategy = "balanced_aggressive"
+            to_emergency_fund = available_money * 0.2
+            to_debts = available_money * 0.8
+            reason = f"✅ У вас есть подушка на {months_covered:.1f} мес. Но есть кредиты под >25%! Давайте их закроем!"
+
+        elif months_covered >= 3:
+            # Есть минимум 3 месяца - можно сфокусироваться на долгах
+            # 10% на подушку (для поддержания), 90% на долги
+            strategy = "debt_focused"
+            to_emergency_fund = available_money * 0.1
+            to_debts = available_money * 0.9
+            reason = f"🎯 У вас отличная подушка на {months_covered:.1f} мес! Фокус на погашение долгов!"
+
+        else:
+            # Есть 1-3 месяца, но нет грабительских кредитов
+            # 30% на подушку, 70% на долги
+            strategy = "balanced"
+            to_emergency_fund = available_money * 0.3
+            to_debts = available_money * 0.7
+            reason = f"💪 У вас {months_covered:.1f} мес подушки. Наращиваем до 3 месяцев + гасим долги."
+
+        # Распределить деньги по долгам (стратегия "Лавина" - сначала высокопроцентные)
+        if to_debts > 0 and debts:
+            sorted_debts = sorted(debts, key=lambda x: x['rate'], reverse=True)
+            remaining_money = to_debts
+
+            for debt in sorted_debts:
+                if remaining_money <= 0:
+                    break
+
+                # Сколько выделить на этот долг
+                allocation = min(remaining_money, debt['balance'])
+                debt_distribution.append({
+                    'name': debt['name'],
+                    'amount': round(allocation, 2),
+                    'rate': debt['rate'],
+                    'remaining_balance': round(debt['balance'] - allocation, 2)
+                })
+                remaining_money -= allocation
+
+        # Рассчитать новый баланс подушки после пополнения
+        new_emergency_fund = emergency_fund_current + to_emergency_fund
+        new_months_covered = new_emergency_fund / monthly_expenses if monthly_expenses > 0 else 0
+        progress_percent = (new_emergency_fund / emergency_fund_target * 100) if emergency_fund_target > 0 else 0
+
+        return {
+            'strategy': strategy,
+            'reason': reason,
+            'to_emergency_fund': round(to_emergency_fund, 2),
+            'to_debts': round(to_debts, 2),
+            'debt_distribution': debt_distribution,
+            'emergency_fund_before': round(emergency_fund_current, 2),
+            'emergency_fund_after': round(new_emergency_fund, 2),
+            'months_covered_before': round(months_covered, 2),
+            'months_covered_after': round(new_months_covered, 2),
+            'target_progress_percent': round(progress_percent, 2),
+            'still_need_for_target': round(max(0, emergency_fund_target - new_emergency_fund), 2)
+        }

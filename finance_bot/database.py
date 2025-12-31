@@ -233,6 +233,40 @@ class Database:
                 )
             ''')
 
+            # Таблица целей подушки безопасности
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS savings_goals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    goal_type TEXT DEFAULT 'emergency_fund',
+                    target_months INTEGER NOT NULL,
+                    monthly_expenses REAL NOT NULL,
+                    target_amount REAL NOT NULL,
+                    current_amount REAL DEFAULT 0,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
+            # Таблица истории накоплений подушки безопасности
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS savings_balance (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    goal_id INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    transaction_type TEXT NOT NULL,
+                    balance_after REAL NOT NULL,
+                    date DATE NOT NULL,
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id),
+                    FOREIGN KEY (goal_id) REFERENCES savings_goals(id)
+                )
+            ''')
+
             # Таблица импортированных банковских операций
             await db.execute('''
                 CREATE TABLE IF NOT EXISTS bank_transactions (
@@ -889,6 +923,128 @@ class Database:
                 # Это упрощенная проверка - в реальности нужно сравнивать счета
                 return len(other_users) > 0
 
+    # ===== EMERGENCY FUND / SAVINGS (ПОДУШКА БЕЗОПАСНОСТИ) =====
+    async def add_savings_goal(self, user_id: int, target_months: int, monthly_expenses: float):
+        """Создать цель подушки безопасности"""
+        target_amount = target_months * monthly_expenses
+        async with aiosqlite.connect(self.db_path) as db:
+            # Деактивировать предыдущие цели
+            await db.execute(
+                'UPDATE savings_goals SET is_active = 0 WHERE user_id = ? AND is_active = 1',
+                (user_id,)
+            )
+
+            # Создать новую цель
+            cursor = await db.execute('''
+                INSERT INTO savings_goals (user_id, target_months, monthly_expenses, target_amount)
+                VALUES (?, ?, ?, ?)
+            ''', (user_id, target_months, monthly_expenses, target_amount))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_active_savings_goal(self, user_id: int):
+        """Получить активную цель подушки безопасности"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM savings_goals WHERE user_id = ? AND is_active = 1',
+                (user_id,)
+            ) as cursor:
+                return await cursor.fetchone()
+
+    async def update_savings_goal(self, goal_id: int, **kwargs):
+        """Обновить цель подушки безопасности"""
+        allowed_fields = {
+            'target_months', 'monthly_expenses', 'target_amount', 'current_amount'
+        }
+
+        updates = {k: v for k, v in kwargs.items() if k in allowed_fields and v is not None}
+
+        if not updates:
+            return False
+
+        set_clause = ', '.join([f"{field} = ?" for field in updates.keys()])
+        values = list(updates.values()) + [goal_id]
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                f'UPDATE savings_goals SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                values
+            )
+            await db.commit()
+            return True
+
+    async def add_to_savings(self, user_id: int, goal_id: int, amount: float,
+                            date: str, transaction_type: str = 'deposit', description: str = None):
+        """Добавить/снять деньги с подушки безопасности"""
+        async with aiosqlite.connect(self.db_path) as db:
+            # Получить текущий баланс цели
+            async with db.execute(
+                'SELECT current_amount FROM savings_goals WHERE id = ?',
+                (goal_id,)
+            ) as cursor:
+                result = await cursor.fetchone()
+                current_balance = result[0] if result else 0
+
+            # Рассчитать новый баланс
+            if transaction_type == 'deposit':
+                new_balance = current_balance + amount
+            elif transaction_type == 'withdrawal':
+                new_balance = max(0, current_balance - amount)
+            else:
+                new_balance = current_balance
+
+            # Добавить транзакцию
+            cursor = await db.execute('''
+                INSERT INTO savings_balance (user_id, goal_id, amount, transaction_type, balance_after, date, description)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (user_id, goal_id, amount, transaction_type, new_balance, date, description))
+
+            # Обновить баланс в цели
+            await db.execute(
+                'UPDATE savings_goals SET current_amount = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+                (new_balance, goal_id)
+            )
+
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_savings_balance(self, user_id: int):
+        """Получить текущий баланс подушки безопасности"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT current_amount, target_amount, target_months, monthly_expenses
+                FROM savings_goals
+                WHERE user_id = ? AND is_active = 1
+            ''', (user_id,)) as cursor:
+                return await cursor.fetchone()
+
+    async def get_savings_history(self, user_id: int, limit: int = 50):
+        """Получить историю пополнений/снятий подушки безопасности"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT * FROM savings_balance
+                WHERE user_id = ?
+                ORDER BY date DESC, created_at DESC
+                LIMIT ?
+            ''', (user_id, limit)) as cursor:
+                return await cursor.fetchall()
+
+    async def calculate_months_covered(self, user_id: int):
+        """Рассчитать на сколько месяцев хватит текущей подушки безопасности"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('''
+                SELECT current_amount, monthly_expenses
+                FROM savings_goals
+                WHERE user_id = ? AND is_active = 1
+            ''', (user_id,)) as cursor:
+                result = await cursor.fetchone()
+                if result and result[1] > 0:
+                    return result[0] / result[1]  # current_amount / monthly_expenses
+                return 0
+
     async def delete_all_user_data(self, user_id: int):
         """
         ОПАСНО! Удалить ВСЕ данные пользователя из базы.
@@ -918,6 +1074,13 @@ class Database:
 
             # Запланированные расходы
             await db.execute('DELETE FROM planned_expenses WHERE user_id = ?', (user_id,))
+
+            # Подушка безопасности
+            await db.execute('''
+                DELETE FROM savings_balance
+                WHERE goal_id IN (SELECT id FROM savings_goals WHERE user_id = ?)
+            ''', (user_id,))
+            await db.execute('DELETE FROM savings_goals WHERE user_id = ?', (user_id,))
 
             # Категории бюджета - НЕ удаляем, т.к. бюджет общий для всех пользователей
             # Если нужно удалить бюджет, это делается вручную через отдельную команду

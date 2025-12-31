@@ -170,6 +170,53 @@ class Database:
                 )
             ''')
 
+            # Таблица категорий бюджета
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS budget_categories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    month INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    category_name TEXT NOT NULL,
+                    planned_amount REAL NOT NULL,
+                    spent_amount REAL DEFAULT 0,
+                    category_type TEXT DEFAULT 'optional',
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(month, year, category_name)
+                )
+            ''')
+
+            # Таблица запланированных расходов
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS planned_expenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    title TEXT NOT NULL,
+                    amount REAL NOT NULL,
+                    due_date DATE NOT NULL,
+                    category TEXT,
+                    is_paid BOOLEAN DEFAULT 0,
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
+            # Таблица истории расходов пользователей (для общего бюджета)
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS user_expense_tracking (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    expense_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    month INTEGER NOT NULL,
+                    year INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (expense_id) REFERENCES expenses(id),
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+            ''')
+
             await db.commit()
 
     # ===== USERS =====
@@ -311,11 +358,12 @@ class Database:
                          description: str = None):
         """Добавить расход"""
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute('''
+            cursor = await db.execute('''
                 INSERT INTO expenses (user_id, category, expense_type, amount, date, is_regular, description)
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (user_id, category, expense_type, amount, date, is_regular, description))
             await db.commit()
+            return cursor.lastrowid
 
     async def get_expenses(self, user_id: int, start_date: str = None, end_date: str = None):
         """Получить расходы за период"""
@@ -420,4 +468,114 @@ class Database:
                 'SELECT * FROM financial_goals WHERE user_id = ? AND is_completed = 0',
                 (user_id,)
             ) as cursor:
+                return await cursor.fetchall()
+
+    # ===== BUDGET CATEGORIES =====
+    async def add_budget_category(self, month: int, year: int, category_name: str, 
+                                  planned_amount: float, category_type: str = 'optional', notes: str = None):
+        """Добавить категорию бюджета"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT OR REPLACE INTO budget_categories (month, year, category_name, planned_amount, category_type, notes, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ''', (month, year, category_name, planned_amount, category_type, notes))
+            await db.commit()
+
+    async def get_budget_categories(self, month: int, year: int):
+        """Получить все категории бюджета за месяц"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM budget_categories WHERE month = ? AND year = ? ORDER BY category_type, category_name',
+                (month, year)
+            ) as cursor:
+                return await cursor.fetchall()
+
+    async def update_category_spent(self, month: int, year: int, category_name: str, amount: float):
+        """Обновить потраченную сумму в категории"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                UPDATE budget_categories 
+                SET spent_amount = spent_amount + ?, updated_at = CURRENT_TIMESTAMP
+                WHERE month = ? AND year = ? AND category_name = ?
+            ''', (amount, month, year, category_name))
+            await db.commit()
+
+    async def get_category_status(self, month: int, year: int, category_name: str):
+        """Получить статус категории бюджета"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                'SELECT * FROM budget_categories WHERE month = ? AND year = ? AND category_name = ?',
+                (month, year, category_name)
+            ) as cursor:
+                return await cursor.fetchone()
+
+    # ===== PLANNED EXPENSES =====
+    async def add_planned_expense(self, user_id: int, title: str, amount: float, 
+                                 due_date: str, category: str = None, notes: str = None):
+        """Добавить запланированный расход"""
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute('''
+                INSERT INTO planned_expenses (user_id, title, amount, due_date, category, notes)
+                VALUES (?, ?, ?, ?, ?, ?)
+            ''', (user_id, title, amount, due_date, category, notes))
+            await db.commit()
+            return cursor.lastrowid
+
+    async def get_planned_expenses(self, user_id: int = None, start_date: str = None, end_date: str = None):
+        """Получить запланированные расходы"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            
+            if user_id and start_date and end_date:
+                query = '''SELECT * FROM planned_expenses 
+                          WHERE user_id = ? AND due_date BETWEEN ? AND ? AND is_paid = 0 
+                          ORDER BY due_date'''
+                params = (user_id, start_date, end_date)
+            elif user_id:
+                query = 'SELECT * FROM planned_expenses WHERE user_id = ? AND is_paid = 0 ORDER BY due_date'
+                params = (user_id,)
+            else:
+                query = 'SELECT * FROM planned_expenses WHERE is_paid = 0 ORDER BY due_date'
+                params = ()
+            
+            async with db.execute(query, params) as cursor:
+                return await cursor.fetchall()
+
+    async def mark_planned_expense_paid(self, planned_id: int):
+        """Отметить запланированный расход как оплаченный"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE planned_expenses SET is_paid = 1 WHERE id = ?',
+                (planned_id,)
+            )
+            await db.commit()
+
+    async def get_all_users(self):
+        """Получить всех пользователей"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('SELECT * FROM users') as cursor:
+                return await cursor.fetchall()
+
+    async def track_user_expense(self, expense_id: int, user_id: int, month: int, year: int):
+        """Отследить какой пользователь внёс расход (для общего бюджета)"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                INSERT INTO user_expense_tracking (expense_id, user_id, month, year)
+                VALUES (?, ?, ?, ?)
+            ''', (expense_id, user_id, month, year))
+            await db.commit()
+
+    async def get_user_expenses_for_month(self, user_id: int, month: int, year: int):
+        """Получить расходы конкретного пользователя за месяц"""
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute('''
+                SELECT e.* FROM expenses e
+                JOIN user_expense_tracking uet ON e.id = uet.expense_id
+                WHERE uet.user_id = ? AND uet.month = ? AND uet.year = ?
+                ORDER BY e.date DESC
+            ''', (user_id, month, year)) as cursor:
                 return await cursor.fetchall()

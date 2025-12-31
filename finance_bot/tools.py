@@ -180,6 +180,61 @@ class FinancialTools:
                     },
                     "required": []
                 }
+            },
+            {
+                "name": "create_budget_category",
+                "description": "Создать категорию бюджета на месяц. Используй когда пользователь планирует бюджет и указывает суммы на категории (продукты, ремонт, развлечения и т.д.)",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "month": {"type": "integer", "description": "Месяц (1-12)"},
+                        "year": {"type": "integer", "description": "Год"},
+                        "category_name": {"type": "string", "description": "Название категории (Продукты, Развлечения, Ремонт машины и т.д.)"},
+                        "planned_amount": {"type": "number", "description": "Запланированная сумма на категорию"},
+                        "category_type": {"type": "string", "description": "Тип: mandatory (обязательные), optional (необязательные), loan (кредиты)"},
+                        "notes": {"type": "string", "description": "Заметки (опционально)"}
+                    },
+                    "required": ["month", "year", "category_name", "planned_amount"]
+                }
+            },
+            {
+                "name": "add_planned_expense",
+                "description": "Добавить запланированный будущий расход. Используй когда пользователь говорит о будущих тратах (например: 'через 5 месяцев вернуть долг Стасу', 'на день рождения сестры 23.02.2026 нужно 10000')",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Описание расхода (например, 'Вернуть долг Стасу', 'Подарок сестре на день рождения')"},
+                        "amount": {"type": "number", "description": "Сумма расхода"},
+                        "due_date": {"type": "string", "description": "Дата когда нужно заплатить (YYYY-MM-DD)"},
+                        "category": {"type": "string", "description": "Категория расхода (опционально)"},
+                        "notes": {"type": "string", "description": "Дополнительные заметки"}
+                    },
+                    "required": ["title", "amount", "due_date"]
+                }
+            },
+            {
+                "name": "get_budget_status",
+                "description": "Получить статус бюджета за месяц - все категории с запланированными и потраченными суммами",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "month": {"type": "integer", "description": "Месяц (1-12)"},
+                        "year": {"type": "integer", "description": "Год"}
+                    },
+                    "required": ["month", "year"]
+                }
+            },
+            {
+                "name": "get_planned_expenses",
+                "description": "Получить список запланированных будущих расходов",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "start_date": {"type": "string", "description": "Начало периода (YYYY-MM-DD)"},
+                        "end_date": {"type": "string", "description": "Конец периода (YYYY-MM-DD)"}
+                    },
+                    "required": []
+                }
             }
         ]
 
@@ -212,6 +267,14 @@ class FinancialTools:
                 return await self._get_financial_summary(user_id)
             elif tool_name == "calculate_debt_strategy":
                 return await self._calculate_debt_strategy(user_id, tool_input)
+            elif tool_name == "create_budget_category":
+                return await self._create_budget_category(user_id, tool_input)
+            elif tool_name == "add_planned_expense":
+                return await self._add_planned_expense(user_id, tool_input)
+            elif tool_name == "get_budget_status":
+                return await self._get_budget_status(user_id, tool_input)
+            elif tool_name == "get_planned_expenses":
+                return await self._get_planned_expenses(user_id, tool_input)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -233,19 +296,103 @@ class FinancialTools:
 
     async def _add_expense(self, user_id: int, input_data: Dict) -> Dict:
         date = input_data.get('date', datetime.now().strftime('%Y-%m-%d'))
-        await self.db.add_expense(
+        amount = input_data['amount']
+        category = input_data['category']
+        description = input_data.get('description', '')
+
+        # Добавить расход в БД
+        expense_id = await self.db.add_expense(
             user_id=user_id,
-            category=input_data['category'],
+            category=category,
             expense_type=input_data['expense_type'],
-            amount=input_data['amount'],
+            amount=amount,
             date=date,
             is_regular=input_data.get('is_regular', False),
-            description=input_data.get('description')
+            description=description
         )
+
+        # Определить месяц и год из даты
+        date_obj = datetime.strptime(date, '%Y-%m-%d')
+        month = date_obj.month
+        year = date_obj.year
+
+        # Автоматическая категоризация для бюджета
+        budget_category = self._auto_categorize_expense(category, description)
+
+        # Проверить существует ли бюджет на этот месяц
+        budget_categories = await self.db.get_budget_categories(month, year)
+        budget_warning = ""
+
+        if budget_categories:
+            # Найти соответствующую категорию бюджета
+            matched_category = None
+            for budget_cat in budget_categories:
+                if budget_cat['category_name'].lower() == budget_category.lower():
+                    matched_category = budget_cat
+                    break
+
+            if matched_category:
+                # Обновить потраченную сумму (метод add'ит amount к текущей сумме)
+                await self.db.update_category_spent(
+                    month=month,
+                    year=year,
+                    category_name=matched_category['category_name'],
+                    amount=amount
+                )
+
+                # Проверить превышение бюджета
+                new_spent = matched_category['spent_amount'] + amount
+                planned = matched_category['planned_amount']
+                if new_spent > planned:
+                    overspend = new_spent - planned
+                    budget_warning = f"\n⚠️ ВНИМАНИЕ: Превышен бюджет категории '{matched_category['category_name']}' на {overspend:,.2f} руб.!"
+                else:
+                    remaining = planned - new_spent
+                    percent_used = (new_spent / planned * 100) if planned > 0 else 0
+                    budget_warning = f"\n💰 Бюджет '{matched_category['category_name']}': использовано {percent_used:.1f}% ({new_spent:,.2f} из {planned:,.2f} руб.)"
+
+            # Трекинг расхода пользователя (для общего бюджета)
+            await self.db.track_user_expense(
+                expense_id=expense_id,
+                user_id=user_id,
+                month=month,
+                year=year
+            )
+
         return {
             "success": True,
-            "message": f"Расход {input_data['amount']} руб. ({input_data['category']}) добавлен"
+            "message": f"Расход {amount:,.2f} руб. ({category}) добавлен{budget_warning}"
         }
+
+    def _auto_categorize_expense(self, category: str, description: str) -> str:
+        """
+        Автоматическая категоризация расхода для бюджета
+        Возвращает нормализованное название категории бюджета
+        """
+        text = (category + " " + description).lower()
+
+        # Словарь ключевых слов для категорий
+        category_keywords = {
+            "Продукты": ["продукты", "магазин", "супермаркет", "пятёрочка", "пятерочка", "перекрёсток", "ашан", "лента", "еда", "продуктовый"],
+            "Развлечения": ["развлечения", "кино", "кинотеатр", "театр", "концерт", "бар", "кафе", "ресторан", "клуб", "развлечение"],
+            "Транспорт": ["транспорт", "бензин", "заправка", "такси", "метро", "автобус", "топливо", "яндекс.такси", "uber"],
+            "Кофе": ["кофе", "кофейня", "старбакс", "coffee"],
+            "Одежда": ["одежда", "обувь", "магазин одежды", "zara", "h&m", "uniqlo"],
+            "Здоровье": ["здоровье", "аптека", "врач", "лекарства", "медицина", "больница", "клиника"],
+            "Коммунальные": ["коммунальные", "жкх", "электричество", "вода", "отопление", "квартплата"],
+            "Связь": ["связь", "телефон", "интернет", "мобильная связь", "мтс", "мегафон", "билайн", "теле2"],
+            "Ремонт машины": ["ремонт машины", "автосервис", "сто", "ремонт авто", "автомобиль", "запчасти"],
+            "Подарки": ["подарок", "подарки", "день рождения", "праздник"],
+        }
+
+        # Поиск совпадений
+        for budget_cat, keywords in category_keywords.items():
+            for keyword in keywords:
+                if keyword in text:
+                    return budget_cat
+
+        # Если не найдено совпадений, вернуть исходную категорию
+        return category.capitalize()
 
     async def _add_loan(self, user_id: int, input_data: Dict) -> Dict:
         loan_id = await self.db.add_loan(
@@ -452,4 +599,106 @@ class FinancialTools:
         return {
             "success": True,
             "comparison": comparison
+        }
+
+    async def _create_budget_category(self, user_id: int, input_data: Dict) -> Dict:
+        await self.db.add_budget_category(
+            month=input_data['month'],
+            year=input_data['year'],
+            category_name=input_data['category_name'],
+            planned_amount=input_data['planned_amount'],
+            category_type=input_data.get('category_type', 'optional'),
+            notes=input_data.get('notes')
+        )
+        return {
+            "success": True,
+            "message": f"Категория '{input_data['category_name']}' добавлена в бюджет на {input_data['month']}/{input_data['year']} с лимитом {input_data['planned_amount']:,.2f} руб."
+        }
+
+    async def _add_planned_expense(self, user_id: int, input_data: Dict) -> Dict:
+        planned_id = await self.db.add_planned_expense(
+            user_id=user_id,
+            title=input_data['title'],
+            amount=input_data['amount'],
+            due_date=input_data['due_date'],
+            category=input_data.get('category'),
+            notes=input_data.get('notes')
+        )
+        return {
+            "success": True,
+            "planned_id": planned_id,
+            "message": f"Запланирован расход '{input_data['title']}' на {input_data['amount']:,.2f} руб. к {input_data['due_date']}"
+        }
+
+    async def _get_budget_status(self, user_id: int, input_data: Dict) -> Dict:
+        month = input_data['month']
+        year = input_data['year']
+        
+        categories = await self.db.get_budget_categories(month, year)
+        
+        if not categories:
+            return {"success": False, "message": f"Бюджет на {month}/{year} не создан"}
+        
+        budget_info = []
+        total_planned = 0
+        total_spent = 0
+        
+        for cat in categories:
+            planned = cat['planned_amount']
+            spent = cat['spent_amount']
+            remaining = planned - spent
+            percent_used = (spent / planned * 100) if planned > 0 else 0
+            
+            total_planned += planned
+            total_spent += spent
+            
+            status = "✅" if spent <= planned else "⚠️ ПРЕВЫШЕНИЕ"
+            
+            budget_info.append({
+                "category": cat['category_name'],
+                "planned": planned,
+                "spent": spent,
+                "remaining": remaining,
+                "percent": percent_used,
+                "status": status
+            })
+        
+        return {
+            "success": True,
+            "month": month,
+            "year": year,
+            "categories": budget_info,
+            "total_planned": total_planned,
+            "total_spent": total_spent,
+            "total_remaining": total_planned - total_spent
+        }
+
+    async def _get_planned_expenses(self, user_id: int, input_data: Dict) -> Dict:
+        planned = await self.db.get_planned_expenses(
+            user_id=user_id,
+            start_date=input_data.get('start_date'),
+            end_date=input_data.get('end_date')
+        )
+        
+        if not planned:
+            return {"success": True, "planned_expenses": [], "message": "Нет запланированных расходов"}
+        
+        planned_list = [
+            {
+                "id": p['id'],
+                "title": p['title'],
+                "amount": p['amount'],
+                "due_date": p['due_date'],
+                "category": p['category']
+            }
+            for p in planned
+        ]
+        
+        total_planned = sum(p['amount'] for p in planned)
+        
+        return {
+            "success": True,
+            "planned_expenses": planned_list,
+            "total_amount": total_planned,
+            "count": len(planned)
         }

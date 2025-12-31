@@ -12,7 +12,7 @@ ALLOWED_USER_IDS = [int(uid) for uid in os.getenv('ALLOWED_USER_IDS', '').split(
 
 # Claude API
 CLAUDE_API_KEY = os.getenv('CLAUDE_API_KEY')
-CLAUDE_MODEL = 'claude-sonnet-4-5-20250929'  # Claude Sonnet 4.5 - самая мощная модель
+CLAUDE_MODEL = 'claude-haiku-4-5'  # Claude Haiku 4.5 - быстрая и дешевая модель (в 3 раза дешевле Sonnet)
 
 # База данных
 DATABASE_PATH = os.getenv('DATABASE_PATH', 'finance_bot.db')

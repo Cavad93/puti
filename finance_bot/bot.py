@@ -6,11 +6,12 @@ import logging
 from datetime import time as datetime_time
 import pytz
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
 )
 
@@ -117,8 +118,15 @@ class FinanceBot:
 "Удали кредит в Альфе"
 
 🔧 СПЕЦИАЛЬНЫЕ КОМАНДЫ:
+• /model - выбрать модель AI (экономия до 92%!)
 • "очистить" - очистить историю диалога (данные НЕ удаляются!)
 • "удалить всё" - ПОЛНОСТЬЮ удалить все данные (с подтверждением)
+
+💰 ЭКОНОМИЯ ТОКЕНОВ:
+Используй /model чтобы выбрать:
+• 🟢 Эконом ($0.25/$1.25) - для простых операций
+• 🟡 Стандарт ($1/$5) - оптимальный баланс
+• 🔵 Умный ($3/$15) - для планирования
 
 Я всё понимаю и помогаю! 🤖"""
 
@@ -136,6 +144,96 @@ class FinanceBot:
             "• Платежи\n"
             "• Бюджеты\n\n"
             "Очищена только память последних сообщений для AI.",
+            parse_mode="Markdown"
+        )
+
+    async def model_settings(self, update: Update, context):
+        """Выбор модели AI для экономии"""
+        user_id = update.effective_user.id
+
+        # Получить текущую модель
+        current_model = await self.db.get_user_model(user_id)
+
+        # Определить название текущей модели
+        model_names = {
+            'claude-3-haiku-20240307': '🟢 Эконом (Haiku 3)',
+            'claude-haiku-4-5': '🟡 Стандарт (Haiku 4.5)',
+            'claude-sonnet-4-5': '🔵 Умный (Sonnet 4.5)'
+        }
+        current_name = model_names.get(current_model, 'Неизвестная')
+
+        # Создать кнопки
+        keyboard = [
+            [InlineKeyboardButton(
+                "🟢 Эконом - Haiku 3 ($0.25/$1.25)" + (" ✅" if current_model == 'claude-3-haiku-20240307' else ""),
+                callback_data='model:claude-3-haiku-20240307'
+            )],
+            [InlineKeyboardButton(
+                "🟡 Стандарт - Haiku 4.5 ($1/$5)" + (" ✅" if current_model == 'claude-haiku-4-5' else ""),
+                callback_data='model:claude-haiku-4-5'
+            )],
+            [InlineKeyboardButton(
+                "🔵 Умный - Sonnet 4.5 ($3/$15)" + (" ✅" if current_model == 'claude-sonnet-4-5' else ""),
+                callback_data='model:claude-sonnet-4-5'
+            )]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        help_text = f"""⚙️ **ВЫБОР МОДЕЛИ AI**
+
+**Текущая модель:** {current_name}
+
+**Выберите модель:**
+
+🟢 **Эконом** (Haiku 3 - $0.25/$1.25)
+• Самая дешевая - экономия до 92%
+• Для простых операций: расходы, доходы, платежи
+• Лаконичные короткие ответы
+
+🟡 **Стандарт** (Haiku 4.5 - $1/$5)
+• Оптимальный баланс цена/качество
+• В 4-5 раз быстрее Sonnet
+• Для большинства задач
+
+🔵 **Умный** (Sonnet 4.5 - $3/$15)
+• Самая мощная модель
+• Для планирования, анализа, сложных вопросов
+• Развернутые подробные ответы
+
+Нажмите кнопку ниже чтобы выбрать:"""
+
+        await update.message.reply_text(
+            help_text,
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
+
+    async def model_callback(self, update: Update, context):
+        """Обработка выбора модели"""
+        query = update.callback_query
+        await query.answer()
+
+        user_id = update.effective_user.id
+        model = query.data.split(':')[1]
+
+        # Сохранить выбор
+        await self.db.set_user_model(user_id, model)
+
+        # Определить название
+        model_info = {
+            'claude-3-haiku-20240307': ('🟢 Эконом (Haiku 3)', '$0.25/$1.25', 'экономия до 92%'),
+            'claude-haiku-4-5': ('🟡 Стандарт (Haiku 4.5)', '$1/$5', 'баланс цена/качество'),
+            'claude-sonnet-4-5': ('🔵 Умный (Sonnet 4.5)', '$3/$15', 'максимум возможностей')
+        }
+
+        name, price, benefit = model_info.get(model, ('Неизвестная', '?', ''))
+
+        await query.edit_message_text(
+            f"✅ **Модель изменена!**\n\n"
+            f"**Выбрано:** {name}\n"
+            f"**Цена:** {price} за 1M токенов\n"
+            f"**Преимущество:** {benefit}\n\n"
+            f"Все следующие сообщения будут обрабатываться этой моделью.",
             parse_mode="Markdown"
         )
 
@@ -529,6 +627,10 @@ class FinanceBot:
         app.add_handler(CommandHandler("start", self.start))
         app.add_handler(CommandHandler("help", self.help_command))
         app.add_handler(CommandHandler("clear", self.clear_history))
+        app.add_handler(CommandHandler("model", self.model_settings))
+
+        # Обработчик выбора модели (callback кнопки)
+        app.add_handler(CallbackQueryHandler(self.model_callback, pattern='^model:'))
 
         # Основной обработчик всех текстовых сообщений
         app.add_handler(MessageHandler(

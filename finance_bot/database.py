@@ -19,9 +19,19 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     username TEXT,
                     first_name TEXT,
+                    preferred_model TEXT DEFAULT 'claude-haiku-4-5',
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # Миграция: добавить поле preferred_model для существующих пользователей
+            try:
+                await db.execute('''
+                    ALTER TABLE users ADD COLUMN preferred_model TEXT DEFAULT 'claude-haiku-4-5'
+                ''')
+                await db.commit()
+            except:
+                pass  # Поле уже существует
 
             # Таблица кредитов и займов
             await db.execute('''
@@ -330,6 +340,25 @@ class Database:
             db.row_factory = aiosqlite.Row
             async with db.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)) as cursor:
                 return await cursor.fetchone()
+
+    async def get_user_model(self, user_id: int) -> str:
+        """Получить предпочитаемую модель пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute(
+                'SELECT preferred_model FROM users WHERE user_id = ?',
+                (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return row[0] if row and row[0] else 'claude-haiku-4-5'
+
+    async def set_user_model(self, user_id: int, model: str):
+        """Установить предпочитаемую модель пользователя"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE users SET preferred_model = ? WHERE user_id = ?',
+                (model, user_id)
+            )
+            await db.commit()
 
     # ===== LOANS =====
     async def add_loan(self, user_id: int, loan_type: str, name: str, principal_amount: float,

@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from config import CLAUDE_API_KEY, CLAUDE_MODEL, get_user_name, USER_NAMES
 from tools import FinancialTools
+from database import Database
 
 
 class FinancialAIAgent:
@@ -13,8 +14,9 @@ class FinancialAIAgent:
 
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=CLAUDE_API_KEY)
-        self.model = CLAUDE_MODEL
+        self.model = CLAUDE_MODEL  # Дефолтная модель
         self.tools = FinancialTools()
+        self.db = Database()
 
         # Хранение истории разговоров по пользователям
         self.conversations: Dict[int, List[Dict]] = {}
@@ -211,14 +213,26 @@ class FinancialAIAgent:
    - ВАЖНО: при слове "остаток", "осталось", "текущий долг" - это current_balance, НЕ principal_amount!
    - Всегда подтверждай что именно изменилось после обновления
 
-ПРАВИЛА:
+ПРАВИЛА ОТВЕТОВ:
 - Будь дружелюбным и понятным
-- Отвечай кратко, но информативно
 - Используй эмодзи для наглядности (💰 💳 📊 ✅ ❌ ⚠️)
-- После каждого действия подтверждай что сделано
-- Если нужна дополнительная информация - спрашивай
 - Помни: у пользователя долги, твоя цель помочь выбраться
 - При внесении расхода автоматически проверяется бюджет
+
+**ЛАКОНИЧНОСТЬ (для простых операций):**
+Для простых операций (расход, доход, платеж по кредиту):
+- ✅ Отвечай КРАТКО - одна строка подтверждения
+- ❌ НЕ пиши длинные пояснения, советы, аналитику
+- ✅ Формат: "✅ [Действие] [сумма] руб. ([категория]) добавлен"
+- Примеры:
+  * "590 за кофе" → "✅ Расход 590 руб. (Кофе) добавлен"
+  * "85000 зарплата" → "✅ Доход 85,000 руб. (Зарплата) добавлен"
+  * "35000 на кредит в Сбере" → "✅ Платёж 35,000 руб. по кредиту Сбербанк. Остаток: 465,000 руб."
+
+Для сложных задач (планирование, анализ, вопросы):
+- Отвечай подробно и развёрнуто
+- Давай советы, рекомендации, аналитику
+- Объясняй логику решений
 
 ТЕКУЩАЯ ДАТА: {current_date}
 
@@ -245,10 +259,13 @@ class FinancialAIAgent:
         if len(self.conversations[user_id]) > 20:
             self.conversations[user_id] = self.conversations[user_id][-20:]
 
+        # Получить предпочитаемую модель пользователя
+        user_model = await self.db.get_user_model(user_id)
+
         try:
-            # Вызов Claude с Tool Use
+            # Вызов Claude с Tool Use (используем модель пользователя)
             response = self.client.messages.create(
-                model=self.model,
+                model=user_model,
                 max_tokens=4096,
                 system=self._get_system_prompt(user_id),
                 tools=self.tools.get_tools_definition(),
@@ -326,7 +343,7 @@ class FinancialAIAgent:
 
                     # Получить следующий ответ
                     current_response = self.client.messages.create(
-                        model=self.model,
+                        model=user_model,
                         max_tokens=2048,
                         system=self._get_system_prompt(user_id),
                         tools=self.tools.get_tools_definition(),

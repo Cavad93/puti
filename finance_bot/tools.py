@@ -336,6 +336,18 @@ class FinancialTools:
                     },
                     "required": ["bank_name"]
                 }
+            },
+            {
+                "name": "remove_duplicate_loans",
+                "description": "Удалить дубликаты кредитов, оставив только указанное количество. Используй когда пользователь говорит о дублирующихся записях кредитов",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "loan_name": {"type": "string", "description": "Название кредита/банка для поиска дубликатов"},
+                        "keep_count": {"type": "integer", "description": "Сколько записей оставить (по умолчанию 1)"}
+                    },
+                    "required": ["loan_name"]
+                }
             }
         ]
 
@@ -392,6 +404,8 @@ class FinancialTools:
                 return await self._update_credit_card(user_id, tool_input)
             elif tool_name == "delete_credit_card":
                 return await self._delete_credit_card(user_id, tool_input)
+            elif tool_name == "remove_duplicate_loans":
+                return await self._remove_duplicate_loans(user_id, tool_input)
             else:
                 return {"success": False, "error": f"Unknown tool: {tool_name}"}
         except Exception as e:
@@ -1183,4 +1197,48 @@ class FinancialTools:
             return {
                 "success": False,
                 "error": "Не удалось удалить карту"
+            }
+
+    async def _remove_duplicate_loans(self, user_id: int, input_data: Dict) -> Dict:
+        """Удалить дубликаты кредитов"""
+        loan_name = input_data.get('loan_name', '')
+        keep_count = input_data.get('keep_count', 1)
+
+        if not loan_name:
+            return {
+                "success": False,
+                "error": "Не указано название кредита"
+            }
+
+        # Сначала проверим сколько всего кредитов с таким названием
+        loans = await self.db.get_loan_by_name(user_id, loan_name)
+
+        if not loans:
+            return {
+                "success": False,
+                "error": f"Кредиты с названием '{loan_name}' не найдены"
+            }
+
+        if len(loans) <= keep_count:
+            return {
+                "success": False,
+                "error": f"Найдено всего {len(loans)} кредит(ов) '{loan_name}', дубликатов нет"
+            }
+
+        # Удалить дубликаты
+        deleted_count = await self.db.find_and_delete_duplicate_loans(
+            user_id,
+            loan_name,
+            keep_count
+        )
+
+        if deleted_count > 0:
+            return {
+                "success": True,
+                "message": f"✅ Удалено {deleted_count} дубликат(ов) кредита '{loan_name}'. Осталась {keep_count} запись(ей)."
+            }
+        else:
+            return {
+                "success": False,
+                "error": "Не удалось удалить дубликаты"
             }

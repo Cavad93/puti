@@ -373,6 +373,40 @@ class Database:
             ) as cursor:
                 return await cursor.fetchall()
 
+    async def find_and_delete_duplicate_loans(self, user_id: int, name_pattern: str, keep_count: int = 1):
+        """
+        Найти дубликаты кредитов по названию и удалить лишние, оставив только keep_count штук.
+        Возвращает количество удалённых записей.
+        """
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Найти все кредиты с этим названием
+            async with db.execute(
+                'SELECT * FROM loans WHERE user_id = ? AND name LIKE ? AND is_active = 1 ORDER BY id',
+                (user_id, f'%{name_pattern}%')
+            ) as cursor:
+                loans = await cursor.fetchall()
+
+            if len(loans) <= keep_count:
+                return 0  # Нет дубликатов для удаления
+
+            # Оставить keep_count первых, удалить остальные
+            loans_to_delete = loans[keep_count:]
+
+            deleted_count = 0
+            for loan in loans_to_delete:
+                # Удалить платежи
+                await db.execute('DELETE FROM loan_payments WHERE loan_id = ?', (loan['id'],))
+                # Удалить каникулы
+                await db.execute('DELETE FROM loan_holidays WHERE loan_id = ?', (loan['id'],))
+                # Удалить кредит
+                await db.execute('DELETE FROM loans WHERE id = ?', (loan['id'],))
+                deleted_count += 1
+
+            await db.commit()
+            return deleted_count
+
     # ===== CREDIT CARDS =====
     async def add_credit_card(self, user_id: int, bank_name: str, credit_limit: float,
                              interest_rate: float, card_name: str = None,
